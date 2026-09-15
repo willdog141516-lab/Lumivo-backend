@@ -1,0 +1,1 @@
+"""Lumivo Backend application package."""
