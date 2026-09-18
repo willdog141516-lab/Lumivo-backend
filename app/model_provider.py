@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -32,6 +33,15 @@ class ScheduleRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RevisionRequest:
+    destination: str
+    day_index: int
+    instruction: str
+    current_poi_uids: tuple[str, ...]
+    candidates: tuple[ScheduleCandidate, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PlannedDay:
     day_index: int
     poi_uids: tuple[str, ...]
@@ -40,6 +50,12 @@ class PlannedDay:
 @dataclass(frozen=True, slots=True)
 class ProposedSchedule:
     days: tuple[PlannedDay, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProposedRevision:
+    day_index: int
+    poi_uids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +71,8 @@ class NarrationSet:
 
 class ModelProvider(Protocol):
     async def create_schedule(self, request: ScheduleRequest) -> ProposedSchedule: ...
+
+    async def revise_day(self, request: RevisionRequest) -> ProposedRevision: ...
 
     async def create_narration(self, request: NarrationRequest) -> NarrationSet: ...
 
@@ -120,12 +138,53 @@ def parse_schedule(content: str, request: ScheduleRequest) -> ProposedSchedule:
     return ProposedSchedule(days=tuple(sorted(days, key=lambda item: item.day_index)))
 
 
+def parse_revision(content: str, request: RevisionRequest) -> ProposedRevision:
+    value = _object(content)
+    if not _exact_keys(value, {"day", "poiUids"}):
+        raise _invalid()
+    day = value["day"]
+    poi_uids = value["poiUids"]
+    if (
+        not isinstance(day, int)
+        or isinstance(day, bool)
+        or day != request.day_index
+        or not isinstance(poi_uids, list)
+        or not poi_uids
+        or any(not isinstance(uid, str) or not uid for uid in poi_uids)
+    ):
+        raise _invalid()
+
+    uid_tuple = tuple(poi_uids)
+    candidate_uids = {candidate.uid for candidate in request.candidates}
+    if len(set(uid_tuple)) != len(uid_tuple) or any(
+        uid not in candidate_uids for uid in uid_tuple
+    ):
+        raise _invalid()
+    return ProposedRevision(day_index=day, poi_uids=uid_tuple)
+
+
+def _normalized_name_anchor(value: str) -> str:
+    return re.sub(r"[\s·—–-]+", "", value)
+
+
+def _contains_name_anchor(text: str, name: str) -> bool:
+    normalized_text = _normalized_name_anchor(text)
+    normalized_name = _normalized_name_anchor(name)
+    if normalized_name in normalized_text:
+        return True
+    return len(normalized_name) >= 3 and any(
+        normalized_name[index : index + 3] in normalized_text
+        for index in range(len(normalized_name) - 2)
+    )
+
+
 def parse_narration(content: str, request: NarrationRequest) -> NarrationSet:
     value = _object(content)
     if not _exact_keys(value, {"narration"}) or not isinstance(value["narration"], list):
         raise _invalid()
 
-    expected_uids = {poi.uid for poi in request.pois}
+    pois_by_uid = {poi.uid: poi for poi in request.pois}
+    expected_uids = set(pois_by_uid)
     narrations: dict[str, str] = {}
     for raw_item in value["narration"]:
         if not isinstance(raw_item, dict) or not _exact_keys(raw_item, {"poiUid", "text"}):
@@ -138,6 +197,10 @@ def parse_narration(content: str, request: NarrationRequest) -> NarrationSet:
             or uid in narrations
             or not isinstance(text, str)
             or not text.strip()
+            or not _contains_name_anchor(
+                text,
+                pois_by_uid[uid].name if uid in pois_by_uid else "",
+            )
         ):
             raise _invalid()
         narrations[uid] = text.strip()
@@ -186,8 +249,33 @@ def _narration_prompt(request: NarrationRequest) -> str:
             "你负责为真实地图 POI 写简短旅行讲解。",
             f"目的地：{request.destination}",
             "只能根据给出的名称、地址和营业时间写作，不得补充未经提供的历史、数据或营业事实。",
+            "每条讲解必须包含对应 POI 的完整名称，或名称中连续三个字的原样锚点。",
             f"真实 POI 事实：{json.dumps(facts, ensure_ascii=False)}",
             '每个 POI 必须返回一条，且只返回严格 JSON：{"narration":[{"poiUid":"候选uid","text":"讲解"}]}',
+        )
+    )
+
+
+def _revision_prompt(request: RevisionRequest) -> str:
+    candidates = [
+        {
+            "uid": candidate.uid,
+            "name": candidate.name,
+            "address": candidate.address,
+            "openingHours": candidate.opening_hours,
+        }
+        for candidate in request.candidates
+    ]
+    return "\n".join(
+        (
+            "你负责修改真实地图 POI 行程中的一天。",
+            f"目的地：{request.destination}",
+            f"目标天数：{request.day_index}",
+            f"用户修改要求：{request.instruction}",
+            f"当前 POI uid：{json.dumps(request.current_poi_uids, ensure_ascii=False)}",
+            "只能返回候选列表中的 uid，不得输出坐标、路线、距离、时长或候选列表之外的事实。",
+            f"候选列表：{json.dumps(candidates, ensure_ascii=False)}",
+            '只返回严格 JSON：{"day":2,"poiUids":["候选uid"]}，day 必须等于目标天数。',
         )
     )
 
@@ -205,6 +293,15 @@ class OpenAIModelAdapter:
             )
         )
         return parse_schedule(response.message.content, request)
+
+    async def revise_day(self, request: RevisionRequest) -> ProposedRevision:
+        response = await self._chat_client.complete(
+            ChatRequest(
+                message=_revision_prompt(request),
+                destination=request.destination,
+            )
+        )
+        return parse_revision(response.message.content, request)
 
     async def create_narration(self, request: NarrationRequest) -> NarrationSet:
         response = await self._chat_client.complete(

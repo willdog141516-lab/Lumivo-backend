@@ -9,6 +9,7 @@ from app.model_provider import (
     ModelProviderError,
     NarrationRequest,
     OpenAIModelAdapter,
+    RevisionRequest,
     ScheduleCandidate,
     ScheduleRequest,
 )
@@ -51,7 +52,7 @@ def test_real_model_adapter_accepts_candidate_uids_and_grounded_narration():
         FakeChatClient(
             [
                 '{"days":[{"day":1,"poiUids":["p1"]}]}',
-                '{"narration":[{"poiUid":"p1","text":"基于真实地址的讲解"}]}',
+                '{"narration":[{"poiUid":"p1","text":"真实景点位于真实地址附近。"}]}',
             ]
         )
     )
@@ -67,7 +68,68 @@ def test_real_model_adapter_accepts_candidate_uids_and_grounded_narration():
 
     assert schedule.days[0].day_index == 1
     assert schedule.days[0].poi_uids == ("p1",)
-    assert narration.by_poi_uid == {"p1": "基于真实地址的讲解"}
+    assert narration.by_poi_uid == {"p1": "真实景点位于真实地址附近。"}
+
+
+def test_real_model_adapter_accepts_valid_revision_uids():
+    adapter = OpenAIModelAdapter(
+        FakeChatClient(['{"day":2,"poiUids":["p1","p2"]}'])
+    )
+    request = RevisionRequest(
+        destination="南京",
+        day_index=2,
+        instruction="增加一个博物馆",
+        current_poi_uids=("p1",),
+        candidates=(
+            ScheduleCandidate("p1", "真实景点", "地址 1", "09:00-18:00"),
+            ScheduleCandidate("p2", "另一个景点", "地址 2", "09:00-18:00"),
+        ),
+    )
+
+    revision = asyncio.run(adapter.revise_day(request))
+
+    assert revision.day_index == 2
+    assert revision.poi_uids == ("p1", "p2")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"day":2,"poiUids":["unknown"]}',
+        '{"day":2,"poiUids":["p1","p1"]}',
+    ],
+)
+def test_real_model_adapter_rejects_invalid_revision_uids(content):
+    adapter = OpenAIModelAdapter(FakeChatClient([content]))
+    request = RevisionRequest(
+        destination="南京",
+        day_index=2,
+        instruction="调整路线",
+        current_poi_uids=("p1",),
+        candidates=(ScheduleCandidate("p1", "真实景点", "地址", None),),
+    )
+
+    with pytest.raises(ModelProviderError) as error:
+        asyncio.run(adapter.revise_day(request))
+
+    assert error.value.code == "MODEL_OUTPUT_INVALID"
+
+
+def test_real_model_adapter_rejects_narration_without_name_anchor():
+    adapter = OpenAIModelAdapter(
+        FakeChatClient(
+            ['{"narration":[{"poiUid":"p1","text":"根据地址写出的讲解"}]}']
+        )
+    )
+
+    with pytest.raises(ModelProviderError) as error:
+        asyncio.run(
+            adapter.create_narration(
+                NarrationRequest(destination="南京", pois=(verified_poi("p1"),))
+            )
+        )
+
+    assert error.value.code == "MODEL_OUTPUT_INVALID"
 
 
 def test_real_model_adapter_rejects_unknown_schedule_uid():
