@@ -1,7 +1,11 @@
+import asyncio
+
 import pytest
 
+from app.domain.chat import TripRevisionRequest
 from app.domain.errors import ErrorCode
 from app.fixtures_nanjing import nanjing_planning_result
+from app.planning_service import FixtureTripPlanner, TripPlannerError
 from app.planning_validator import PlanValidationError, validate_plan
 from app.story_compiler import compile_timeline
 
@@ -40,3 +44,20 @@ def test_validator_rejects_route_endpoint_mismatch():
         validate_plan(broken_plan)
 
     assert error.value.error.code is ErrorCode.PLAN_INCOMPLETE
+
+
+def test_fixture_revision_fails_closed():
+    result = nanjing_planning_result()
+
+    with pytest.raises(TripPlannerError) as error:
+        asyncio.run(
+            FixtureTripPlanner(None).revise(
+                TripRevisionRequest(
+                    plan=result.plan,
+                    day=1,
+                    instruction="换一个景点",
+                )
+            )
+        )
+
+    assert error.value.code == "PLAN_NOT_AVAILABLE"

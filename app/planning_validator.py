@@ -37,3 +37,43 @@ def validate_plan(plan: TripPlan, candidate_uids: set[str] | None = None) -> Tri
                 raise _invalid_plan()
 
     return plan
+
+
+def validate_revision(
+    original: TripPlan,
+    revised: TripPlan,
+    target_day: int,
+    target_candidate_uids: set[str],
+) -> TripPlan:
+    if (
+        original.id != revised.id
+        or revised.version != original.version + 1
+        or original.destination != revised.destination
+        or len(original.days) != len(revised.days)
+        or target_day < 1
+        or target_day > len(original.days)
+        or [day.day_index for day in revised.days]
+        != list(range(1, len(revised.days) + 1))
+    ):
+        raise _invalid_plan()
+
+    target_index = target_day - 1
+    for index, (original_day, revised_day) in enumerate(
+        zip(original.days, revised.days)
+    ):
+        if index != target_index and original_day != revised_day:
+            raise _invalid_plan()
+
+    target_uids = [stop.poi.uid for stop in revised.days[target_index].stops]
+    if not target_uids or any(uid not in target_candidate_uids for uid in target_uids):
+        raise _invalid_plan()
+
+    all_uids = [
+        stop.poi.uid
+        for day in revised.days
+        for stop in day.stops
+    ]
+    if len(all_uids) != len(set(all_uids)):
+        raise _invalid_plan()
+
+    return validate_plan(revised)

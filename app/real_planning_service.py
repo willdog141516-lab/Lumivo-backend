@@ -1,20 +1,20 @@
 from __future__ import annotations
-
 from uuid import uuid4
 
 from app.baidu_map import MapProviderError
-from app.domain.chat import TripPlanRequest
+from app.domain.chat import TripPlanRequest, TripRevisionRequest
 from app.domain.trips import PlanningResult, TripDay, TripPlan, TripStop, VerifiedPoi
 from app.map_provider import MapProvider, PoiSearchQuery, RouteRequest
 from app.model_provider import (
     ModelProvider,
     ModelProviderError,
     NarrationRequest,
+    RevisionRequest,
     ScheduleCandidate,
     ScheduleRequest,
 )
-from app.planning_service import TripPlannerError
-from app.planning_validator import PlanValidationError, validate_plan
+from app.planning_service import ProgressCallback, TripPlannerError, emit_progress
+from app.planning_validator import PlanValidationError, validate_plan, validate_revision
 from app.story_compiler import compile_timeline
 
 
@@ -43,17 +43,28 @@ class RealTripPlanner:
         self._map_provider = map_provider
         self._model_provider = model_provider
 
-    async def plan(self, request: TripPlanRequest) -> PlanningResult:
+    async def plan(
+        self,
+        request: TripPlanRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult:
         if any(marker in request.destination for marker in OVERSEAS_MARKERS):
             raise TripPlannerError("UNSUPPORTED_REGION", "暂不支持该地区，等待后续开发")
 
         try:
-            await self._map_provider.resolve_destination(request.destination)
+            resolved_destination = await self._map_provider.resolve_destination(request.destination)
+            await emit_progress(
+                progress,
+                "destination.validated",
+                {"destination": resolved_destination.name},
+            )
             candidates = await self._map_provider.search_pois(
                 PoiSearchQuery(request.destination, ("旅游景点",), 20)
             )
             if len(candidates) < request.days:
                 raise TripPlannerError("POI_NOT_FOUND", "该目的地没有足够的可用 POI")
+            await emit_progress(progress, "pois.found", {"count": len(candidates)})
 
             candidate_by_uid = {poi.uid: poi for poi in candidates}
             schedule = await self._model_provider.create_schedule(
@@ -94,6 +105,7 @@ class RealTripPlanner:
                     )
                 )
 
+            await emit_progress(progress, "routes.calculated", {"count": sum(len(day.route_legs) for day in days)})
             narrations = await self._model_provider.create_narration(
                 NarrationRequest(destination=request.destination, pois=tuple(selected_pois))
             )
@@ -121,6 +133,7 @@ class RealTripPlanner:
                 days=days,
             )
             validate_plan(plan, set(candidate_by_uid))
+            await emit_progress(progress, "plan.validated", {})
         except TripPlannerError:
             raise
         except ModelProviderError as error:
@@ -130,7 +143,136 @@ class RealTripPlanner:
         except MapProviderError as error:
             raise TripPlannerError(error.code, str(error)) from None
 
-        return PlanningResult(plan=plan, timeline=compile_timeline(plan))
+        result = PlanningResult(plan=plan, timeline=compile_timeline(plan))
+        await emit_progress(progress, "timeline.ready", {})
+        return result
+
+    async def revise(
+        self,
+        request: TripRevisionRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult:
+        original = request.plan
+        target_index = request.day - 1
+        try:
+            validate_plan(original)
+            resolved_destination = await self._map_provider.resolve_destination(
+                original.destination
+            )
+            await emit_progress(
+                progress,
+                "destination.validated",
+                {"destination": resolved_destination.name},
+            )
+            candidates = await self._map_provider.search_pois(
+                PoiSearchQuery(original.destination, ("旅游景点",), 20)
+            )
+            untouched_uids = {
+                stop.poi.uid
+                for index, day in enumerate(original.days)
+                if index != target_index
+                for stop in day.stops
+            }
+            candidate_by_uid = {
+                poi.uid: poi for poi in candidates if poi.uid not in untouched_uids
+            }
+            for stop in original.days[target_index].stops:
+                if stop.poi.uid not in candidate_by_uid:
+                    candidate_by_uid[stop.poi.uid] = stop.poi
+            if not candidate_by_uid:
+                raise TripPlannerError("POI_NOT_FOUND", "该目的地没有可用的候选 POI")
+            await emit_progress(
+                progress,
+                "pois.found",
+                {"count": len(candidate_by_uid)},
+            )
+
+            revision = await self._model_provider.revise_day(
+                RevisionRequest(
+                    destination=original.destination,
+                    day_index=request.day,
+                    instruction=request.instruction,
+                    current_poi_uids=tuple(
+                        stop.poi.uid for stop in original.days[target_index].stops
+                    ),
+                    candidates=tuple(
+                        ScheduleCandidate(
+                            uid=poi.uid,
+                            name=poi.name,
+                            address=poi.address,
+                            opening_hours=poi.opening_hours,
+                        )
+                        for poi in candidate_by_uid.values()
+                    ),
+                )
+            )
+            if (
+                revision.day_index != request.day
+                or not revision.poi_uids
+                or len(set(revision.poi_uids)) != len(revision.poi_uids)
+                or any(uid not in candidate_by_uid for uid in revision.poi_uids)
+            ):
+                raise TripPlannerError("MODEL_OUTPUT_INVALID", INVALID_MODEL_OUTPUT)
+
+            pois = [candidate_by_uid[uid] for uid in revision.poi_uids]
+            route_legs = [
+                await self._map_provider.route(RouteRequest(start, end))
+                for start, end in zip(pois, pois[1:])
+            ]
+            await emit_progress(
+                progress,
+                "routes.calculated",
+                {"count": len(route_legs)},
+            )
+            narrations = await self._model_provider.create_narration(
+                NarrationRequest(destination=original.destination, pois=tuple(pois))
+            )
+            if set(narrations.by_poi_uid) != set(revision.poi_uids):
+                raise ModelProviderError("MODEL_OUTPUT_INVALID", INVALID_MODEL_OUTPUT)
+            revised_stops = [
+                TripStop(
+                    poi=poi,
+                    narration=narrations.by_poi_uid[poi.uid],
+                )
+                for poi in pois
+            ]
+            previous_day = original.days[target_index]
+            revised_day = TripDay(
+                day_index=previous_day.day_index,
+                title=f"第{previous_day.day_index}天：{pois[0].name}",
+                date=previous_day.date,
+                summary=f"围绕{pois[0].name}安排的真实地点路线。",
+                stops=revised_stops,
+                route_legs=route_legs,
+            )
+            revised_days = list(original.days)
+            revised_days[target_index] = revised_day
+            revised_plan = original.model_copy(
+                update={
+                    "version": original.version + 1,
+                    "days": revised_days,
+                }
+            )
+            validate_revision(
+                original,
+                revised_plan,
+                request.day,
+                set(candidate_by_uid),
+            )
+            await emit_progress(progress, "plan.validated", {})
+        except TripPlannerError:
+            raise
+        except ModelProviderError as error:
+            raise TripPlannerError(error.code, str(error)) from None
+        except PlanValidationError as error:
+            raise TripPlannerError("PLAN_INCOMPLETE", str(error)) from None
+        except MapProviderError as error:
+            raise TripPlannerError(error.code, str(error)) from None
+
+        result = PlanningResult(plan=revised_plan, timeline=compile_timeline(revised_plan))
+        await emit_progress(progress, "timeline.ready", {})
+        return result
 
     @staticmethod
     def _validate_schedule(days, requested_days: int, candidates: dict[str, VerifiedPoi]) -> None:

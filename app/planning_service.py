@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Awaitable, Callable, Protocol
 
 from app.ai_client import ChatClient
-from app.domain.chat import ChatRequest, TripPlanRequest
+from app.domain.chat import ChatRequest, TripPlanRequest, TripRevisionRequest
 from app.domain.trips import PlanningResult, TripPlan
 from app.fixtures_nanjing import nanjing_planning_result, nanjing_trip_plan
 from app.planning_validator import validate_plan
@@ -17,8 +17,32 @@ class TripPlannerError(Exception):
         self.code = code
 
 
+ProgressCallback = Callable[[str, dict[str, object]], Awaitable[None]]
+
+
+async def emit_progress(
+    progress: ProgressCallback | None,
+    event: str,
+    data: dict[str, object] | None = None,
+) -> None:
+    if progress is not None:
+        await progress(event, data or {})
+
+
 class TripPlanner(Protocol):
-    async def plan(self, request: TripPlanRequest) -> PlanningResult: ...
+    async def plan(
+        self,
+        request: TripPlanRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult: ...
+
+    async def revise(
+        self,
+        request: TripRevisionRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult: ...
 
 
 @dataclass(frozen=True)
@@ -113,7 +137,12 @@ class FixtureTripPlanner:
     def __init__(self, chat_client: ChatClient) -> None:
         self._chat_client = chat_client
 
-    async def plan(self, request: TripPlanRequest) -> PlanningResult:
+    async def plan(
+        self,
+        request: TripPlanRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult:
         if any(marker in request.destination for marker in OVERSEAS_MARKERS):
             raise TripPlannerError("UNSUPPORTED_REGION", "暂不支持该地区，等待后续开发")
 
@@ -121,6 +150,11 @@ class FixtureTripPlanner:
         if destination != "南京" or request.days != 3:
             raise TripPlannerError("PLAN_NOT_AVAILABLE", "当前目的地的可播放行程尚未接入")
 
+        await emit_progress(
+            progress,
+            "destination.validated",
+            {"destination": request.destination},
+        )
         prompt = build_fixture_selection_prompt(request)
         response = await self._chat_client.complete(
             ChatRequest(
@@ -135,7 +169,19 @@ class FixtureTripPlanner:
             if not _has_exact_fixture_selection(selection, plan):
                 raise ValueError(INVALID_SELECTION_MESSAGE)
             result = nanjing_planning_result()
+            await emit_progress(progress, "pois.found", {"count": 9})
+            await emit_progress(progress, "routes.calculated", {"count": 6})
             validate_plan(result.plan, {stop.poi.uid for day in plan.days for stop in day.stops})
+            await emit_progress(progress, "plan.validated", {})
+            await emit_progress(progress, "timeline.ready", {})
             return result
         except (ValueError, TypeError, KeyError):
             raise TripPlannerError("MODEL_OUTPUT_INVALID", INVALID_SELECTION_MESSAGE) from None
+
+    async def revise(
+        self,
+        request: TripRevisionRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult:
+        raise TripPlannerError("PLAN_NOT_AVAILABLE", "当前目的地的可播放行程尚未接入")
