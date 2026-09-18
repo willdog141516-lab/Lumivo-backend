@@ -1,6 +1,6 @@
 # Lumivo Backend Context
 
-Last updated: 2026-09-14
+Last updated: 2026-09-18
 
 ## Relationship to the frontend
 
@@ -29,20 +29,20 @@ Overseas destinations return `UNSUPPORTED_REGION` with “暂不支持该地区�
 - Coordinate system at the map seam: BD-09.
 - First fixture and acceptance scenario: Nanjing, three days.
 - Initial delivery mode: fixture remains the offline default; `full-real` uses BaiduMap plus the OpenAI-compatible model adapter.
-- Integration order: deterministic fixture and local HTTP flow are complete; real Baidu map data and constrained real AI are implemented locally; live credentials, revision and hardening remain.
+- Integration order: deterministic fixture and local HTTP flow are complete; real Baidu map data, constrained real AI, canonical NDJSON planning, and stateless day revision are implemented locally; live credentials, browser acceptance, and hardening remain.
 - No login, database, Redis, queue, server deployment, or overseas planning in the MVP.
 
 ## Current implementation
 
-Python 兼容后端已经接管前端当前使用的本地接口：`GET /health`、`POST /api/chat` 和 `POST /api/trips/plan`。聊天接口通过 OpenAI-compatible Chat Completions 调用 AI，并支持 SSE 增量输出；规划接口在 `fixture` 模式返回南京三日 fixture，在 `full-real`/`map-real` 模式读取百度真实 POI、BD-09 坐标和路线，并要求 AI 只选择已验证 UID，最后校验路线端点和 StoryTimeline 身份。`GET /api/v1/health` 保留为 Python 规范健康检查。
+Python 兼容后端已经接管前端当前使用的本地接口：`GET /health`、`POST /api/chat` 和 `POST /api/trips/plan`。聊天接口通过 OpenAI-compatible Chat Completions 调用 AI，并支持 SSE 增量输出；规范规划接口 `POST /api/v1/trips/plan` 与 `POST /api/v1/trips/revise` 以 NDJSON 输出进度和终态结果，规划结果只允许已验证 UID、有效路线和匹配的 StoryTimeline。`GET /api/v1/health` 保留为 Python 规范健康检查。
 
-默认 Adapter 模式仍为 `fixture`。真实模式需要 `LUMIVO_BAIDU_MAP_AK` 和 AI Key；实时凭据/配额验证、全国更丰富的检索、NDJSON 规划接口、修订、数据库和外部持久化仍未完成。
+默认 Adapter 模式仍为 `fixture`。真实模式需要 `LUMIVO_BAIDU_MAP_AK` 和 AI Key；NDJSON 规划和无状态修订已完成；实时凭据/配额验证、浏览器验收、全国更丰富的检索、数据库和外部持久化仍未完成。
 
 ## Immediate build sequence
 
 1. Verify live Baidu POIs/routes and live AI with configured credentials.
-2. Expose the canonical NDJSON planning endpoint and connect a frontend TripClient.
-3. Add stateless revision and hardening.
+2. Complete browser acceptance, cancellation/retry hardening, and performance evidence.
+3. Keep database, cloud persistence, deployment, and authentication outside the MVP.
 
 ## Core evidence rule
 

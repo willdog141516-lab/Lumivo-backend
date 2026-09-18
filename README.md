@@ -17,7 +17,13 @@ Python 兼容后端已接管前端当前使用的本地接口：
 - `TripPlan`、`StoryTimeline` 的前端 camelCase JSON 契约
 - 默认不联网的 Pytest 测试
 
-当前默认是 `fixture` 模式。设置 `LUMIVO_PROVIDER_MODE=full-real` 后，规划会读取百度真实 POI、BD-09 坐标和路线，并让 AI 只从已验证 POI 中排程。`/api/v1/trips/plan` NDJSON、修订、数据库和部署仍未实现。
+当前默认是 `fixture` 模式。设置 `LUMIVO_PROVIDER_MODE=full-real` 后，规划会读取百度真实 POI、BD-09 坐标和路线，并让 AI 只从已验证 POI 中排程。规范接口 `/api/v1/trips/plan` 和 `/api/v1/trips/revise` 已通过 NDJSON 输出进度、终态结果或结构化错误；修订不依赖服务端会话，沿用同一行程 ID 并递增版本。数据库和部署仍不在 MVP 范围内。
+
+### 规范规划流
+
+- `POST /api/v1/trips/plan`：接受规划请求，返回逐行 NDJSON 进度和最终 `PlanningResult`。
+- `POST /api/v1/trips/revise`：接受当前完整 `TripPlan`、目标天数和修订指令，返回新版本的规划结果。
+- 前端 `TripClient` 已消费这两个接口；旧的 `/api/chat` 和 `/api/trips/plan` 保留为兼容接口。
 
 ## 本地启动
 

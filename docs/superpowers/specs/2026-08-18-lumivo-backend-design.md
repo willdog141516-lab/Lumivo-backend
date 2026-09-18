@@ -2,7 +2,7 @@
 
 Date: 2026-08-18
 
-Status: Fixture and local full-real compatibility paths implemented; canonical NDJSON and revision pending
+Status: Fixture, full-real, canonical NDJSON, and stateless revision paths implemented locally; live smoke and hardening pending
 
 ## 1. Purpose
 
@@ -271,7 +271,7 @@ has not moved to the canonical `/api/v1` client:
   verified POIs and DirectionLite route facts plus constrained model output.
 
 These routes are a compatibility boundary, not a second planning contract.
-They remain fixture-only until the frontend adopts the canonical NDJSON flow.
+The canonical NDJSON flow is now the frontend planning path; these routes remain as compatibility boundaries for existing clients.
 
 ### `POST /api/v1/trips/plan`
 
@@ -373,7 +373,7 @@ Add the selected model client, structured schedule output, UID grounding, narrat
 
 ### Phase 5: revision and hardening
 
-Add stateless revision, cancellation propagation, retry behavior, performance measurements, and full Nanjing acceptance evidence.
+Stateless revision and cancellation-aware streaming are implemented locally. Remaining work is live provider smoke verification, retry/performance evidence, and full Nanjing browser acceptance.
 
 Deployment and authentication remain separate later decisions.
 
