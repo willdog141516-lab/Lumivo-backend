@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.ai_client import ChatClient, OpenAICompatibleChatClient
+from app.api.canonical import create_canonical_router
 from app.api.compat import create_compat_router
 from app.api.health import create_health_router
 from app.baidu_map import BaiduMapAdapter
@@ -18,7 +19,7 @@ MAX_BODY_BYTES = 64 * 1024
 def create_app(
     settings: Settings | None = None,
     chat_client: ChatClient | None = None,
-    planner: FixtureTripPlanner | None = None,
+    planner: TripPlanner | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_chat_client = chat_client or OpenAICompatibleChatClient(resolved_settings)
@@ -54,6 +55,7 @@ def create_app(
         return await call_next(request)
 
     application.include_router(create_compat_router(resolved_settings, resolved_chat_client, resolved_planner))
+    application.include_router(create_canonical_router(resolved_planner))
     application.include_router(create_health_router(resolved_settings), prefix="/api/v1")
     return application
 
