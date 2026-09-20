@@ -1,5 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
+from hashlib import md5
+from urllib.parse import quote, urlencode
 
 import httpx
 import pytest
@@ -92,8 +94,42 @@ def test_baidu_adapter_normalizes_geocode_poi_and_route_facts():
     ]
 
 
+def test_baidu_adapter_adds_sn_signature_when_sk_is_configured():
+    observed: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed.update(dict(request.url.params.items()))
+        return httpx.Response(
+            200,
+            json={"status": 0, "result": {"location": {"lng": 118.8, "lat": 32.0}}},
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = BaiduMapAdapter(
+                Settings(baidu_map_ak="test-ak", baidu_map_sk="test-sk"), client
+            )
+            await adapter.resolve_destination("成都")
+
+    asyncio.run(run())
+
+    assert observed["ak"] == "test-ak"
+    assert observed["timestamp"].isdigit()
+    params = {
+        "address": "成都",
+        "output": "json",
+        "ret_coordtype": "bd09ll",
+        "ak": "test-ak",
+        "timestamp": observed["timestamp"],
+    }
+    expected_sn = md5(
+        quote("/geocoding/v3/?" + urlencode(params) + "test-sk", safe="").encode("utf-8")
+    ).hexdigest()
+    assert observed["sn"] == expected_sn
+
+
 def test_baidu_adapter_requires_an_api_key():
-    adapter = BaiduMapAdapter(Settings())
+    adapter = BaiduMapAdapter(Settings(_env_file=None))
 
     with pytest.raises(MapProviderError) as error:
         asyncio.run(adapter.resolve_destination("南京"))

@@ -33,6 +33,15 @@ def test_compiler_emits_playable_route_commands_for_fixture():
     }
 
 
+def test_compiler_uses_the_plan_day_count_in_the_intro_narration():
+    result = nanjing_planning_result()
+    one_day_plan = result.plan.model_copy(update={"days": result.plan.days[:1]})
+
+    intro_text = compile_timeline(one_day_plan).chapters[0].commands[-1].payload["text"]
+
+    assert intro_text == "南京一日行程，从夫子庙-秦淮风光带开始。"
+
+
 def test_validator_rejects_route_endpoint_mismatch():
     result = nanjing_planning_result()
     day = result.plan.days[0]

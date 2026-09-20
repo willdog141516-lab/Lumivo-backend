@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.ai_client import ChatClient, OpenAICompatibleChatClient
 from app.api.canonical import create_canonical_router
@@ -40,6 +41,22 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @application.exception_handler(StarletteHTTPException)
+    async def handle_http_error(
+        request: Request, error: StarletteHTTPException
+    ) -> JSONResponse:
+        errors = {
+            404: ("NOT_FOUND", "请求的接口不存在"),
+            405: ("METHOD_NOT_ALLOWED", "请求方法不支持"),
+        }
+        code, message = errors.get(error.status_code, ("INTERNAL_ERROR", "服务器内部错误"))
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"error": {"code": code, "message": message}},
+            headers=error.headers,
+        )
+
     @application.middleware("http")
     async def reject_oversized_bodies(request: Request, call_next):
         content_length = request.headers.get("content-length")
@@ -50,7 +67,7 @@ def create_app(
         if oversized:
             return JSONResponse(
                 status_code=413,
-                content={"error": {"code": "INVALID_REQUEST", "message": "请求体不能超过 64 KiB"}},
+                content={"error": {"code": "REQUEST_TOO_LARGE", "message": "请求体不能超过 64 KiB"}},
             )
         return await call_next(request)
 

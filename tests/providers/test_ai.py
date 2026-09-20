@@ -49,6 +49,35 @@ def test_openai_compatible_client_sends_context_and_reads_content():
     assert body["messages"][-1]["content"].startswith("目的地：南京")
 
 
+def test_openai_compatible_client_sends_professional_grounding_rules():
+    seen: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "回复"}}]},
+        )
+
+    async def run():
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as http_client:
+            client = OpenAICompatibleChatClient(
+                Settings(ai_api_key="test-key"),
+                http_client=http_client,
+            )
+            await client.complete(ChatRequest(message="规划行程"))
+
+    asyncio.run(run())
+
+    body = seen["body"]
+    assert isinstance(body, dict)
+    system_prompt = body["messages"][0]["content"]
+    assert "先理解用户的目的地、日期、偏好和时间约束" in system_prompt
+    assert "区分“已验证事实”“规划建议”和“待确认信息”" in system_prompt
+    assert "数据缺失或冲突时，明确说明并请求补充" in system_prompt
+
+
 def test_openai_compatible_client_streams_delta_content():
     seen: dict[str, object] = {}
 

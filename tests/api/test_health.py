@@ -5,7 +5,7 @@ from app.settings import Settings
 
 
 def test_health_reports_fixture_modes():
-    client = TestClient(create_app(Settings()))
+    client = TestClient(create_app(Settings(_env_file=None)))
 
     response = client.get("/api/v1/health")
 

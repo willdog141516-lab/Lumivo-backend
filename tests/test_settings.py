@@ -10,7 +10,7 @@ def test_settings_use_fixture_defaults(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.app_name == "Lumivo Backend"
     assert settings.environment == "development"
@@ -23,6 +23,7 @@ def test_settings_accept_environment_overrides(monkeypatch):
     monkeypatch.setenv("LUMIVO_ENVIRONMENT", "test")
     monkeypatch.setenv("LUMIVO_PROVIDER_MODE", "map-real")
     monkeypatch.setenv("LUMIVO_FRONTEND_ORIGIN", "http://localhost:3100")
+    monkeypatch.setenv("LUMIVO_BAIDU_MAP_SK", "test-sk")
 
     settings = Settings()
 
@@ -30,3 +31,4 @@ def test_settings_accept_environment_overrides(monkeypatch):
     assert settings.environment == "test"
     assert settings.provider_mode == "map-real"
     assert settings.frontend_origin == "http://localhost:3100"
+    assert settings.baidu_map_sk == "test-sk"

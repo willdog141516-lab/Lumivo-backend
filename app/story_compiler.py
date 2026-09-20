@@ -161,7 +161,7 @@ def compile_timeline(plan: TripPlan) -> StoryTimeline:
                     StoryCommandType.NARRATION_SHOW,
                     3_900,
                     1_200,
-                    {"text": f"{plan.destination}三日行程，从{first_stop.poi.name}开始。"},
+                    {"text": f"{plan.destination}{_ordinal(len(plan.days))}日行程，从{first_stop.poi.name}开始。"},
                 ),
             ],
         )

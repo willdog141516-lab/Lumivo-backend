@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import md5
+from time import time
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -75,8 +78,16 @@ class BaiduMapAdapter:
             timeout=self._settings.map_timeout_ms / 1000
         )
         try:
+            request_params = dict(params)
+            if self._settings.baidu_map_sk:
+                request_params["timestamp"] = str(int(time()))
+                signing_text = quote(
+                    f"{path}?{urlencode(request_params)}{self._settings.baidu_map_sk}",
+                    safe="",
+                )
+                request_params["sn"] = md5(signing_text.encode("utf-8")).hexdigest()
             response = await client.get(
-                f"{self._settings.map_base_url.rstrip('/')}{path}", params=params
+                f"{self._settings.map_base_url.rstrip('/')}{path}", params=request_params
             )
             if response.status_code >= 400:
                 raise MapProviderError("MAP_PROVIDER_ERROR", "百度地图服务暂时不可用")

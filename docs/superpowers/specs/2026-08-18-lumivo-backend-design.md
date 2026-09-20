@@ -301,16 +301,29 @@ class AppError(BaseModel):
 
 MVP error codes are:
 
+- `INVALID_REQUEST`
+- `NOT_FOUND`
+- `METHOD_NOT_ALLOWED`
+- `REQUEST_TOO_LARGE`
+- `AI_NOT_CONFIGURED`
+- `AI_PROVIDER_ERROR`
+- `AI_PROVIDER_TIMEOUT`
 - `UNSUPPORTED_REGION`
+- `PLAN_NOT_AVAILABLE`
 - `POI_NOT_FOUND`
 - `ROUTE_UNAVAILABLE`
 - `MAP_PROVIDER_TIMEOUT`
+- `MAP_PROVIDER_ERROR`
 - `MODEL_PROVIDER_TIMEOUT`
 - `MODEL_OUTPUT_INVALID`
 - `PLAN_INCOMPLETE`
 - `TIMELINE_MISMATCH`
 - `REQUEST_CANCELLED`
 - `INTERNAL_ERROR`
+
+The current compatibility HTTP routes serialize errors as
+`{"error":{"code":"...","message":"..."}}`; `retryable` and `details`
+remain reserved domain fields for now.
 
 Transient provider timeouts are retried once with a bounded delay. Unsupported regions, validation failures, and malformed model output are not retried. The stream ends with one error envelope and no playable timeline.
 
@@ -324,7 +337,7 @@ Settings come from environment variables parsed once at process startup. Planned
 | `map-real` | BaiduMap | MockModel | Independent map verification |
 | `full-real` | BaiduMap | RealModel | Complete local product flow |
 
-The frontend never selects backend providers and never receives backend credentials. Local CORS allows only the configured frontend origin, initially `http://localhost:8989`.
+The frontend never selects backend providers and never receives backend credentials. Baidu requests use `LUMIVO_BAIDU_MAP_AK`; when the Baidu console enables SN validation, the backend also reads `LUMIVO_BAIDU_MAP_SK` and signs each request with `timestamp` and `sn`. Local CORS allows only the configured frontend origin, initially `http://localhost:8989`.
 
 ## 13. Testing
 

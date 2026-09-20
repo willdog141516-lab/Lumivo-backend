@@ -44,6 +44,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("LUMIVO_BAIDU_MAP_AK", "BAIDU_MAP_AK"),
     )
+    baidu_map_sk: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LUMIVO_BAIDU_MAP_SK", "BAIDU_MAP_SK"),
+    )
     map_base_url: str = Field(
         default="https://api.map.baidu.com",
         validation_alias=AliasChoices("LUMIVO_MAP_BASE_URL", "MAP_BASE_URL"),

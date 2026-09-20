@@ -95,11 +95,12 @@ def test_real_planner_builds_timeline_from_provider_facts():
     map_provider = FakeMapProvider()
     result = asyncio.run(
         RealTripPlanner(map_provider, FakeModelProvider()).plan(
-            TripPlanRequest(message="南京一日游", destination="南京", days=1)
+            TripPlanRequest(message="成都一日游", destination="成都", days=1)
         )
     )
 
     assert result.plan.id.startswith("trip-")
+    assert result.plan.destination == "成都"
     assert result.plan.days[0].stops[0].poi.source == "baidu"
     assert result.plan.days[0].route_legs[0].distance_meters == 1234
     assert result.plan.days[0].route_legs[0].geometry[1].lng == 118.8

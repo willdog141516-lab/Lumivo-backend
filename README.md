@@ -72,11 +72,12 @@ python -m pytest
 
 ## 真实数据模式
 
-复制 `.env.example` 为 `.env`，填入百度服务端 AK 和 AI 服务密钥，然后设置：
+复制 `.env.example` 为 `.env`，填入百度服务端 AK；如果百度控制台启用了 SN 校验，再填入 SK；同时填入 AI 服务密钥，然后设置：
 
 ```dotenv
 LUMIVO_PROVIDER_MODE=full-real
 LUMIVO_BAIDU_MAP_AK=你的百度服务端AK
+LUMIVO_BAIDU_MAP_SK=你的百度服务端SK（启用SN校验时填写）
 AI_API_KEY=你的AI服务密钥
 ```
 
@@ -93,6 +94,7 @@ AI_API_KEY=你的AI服务密钥
 | `LUMIVO_PROVIDER_MODE` | `fixture` | `fixture`、`map-real` 或 `full-real` |
 | `LUMIVO_FRONTEND_ORIGIN` | `http://localhost:8989` | CORS 允许的前端地址 |
 | `LUMIVO_BAIDU_MAP_AK` | 空 | 百度地图服务端 AK；真实模式必填 |
+| `LUMIVO_BAIDU_MAP_SK` | 空 | 百度地图服务端 SK；启用 SN 校验时填写 |
 | `LUMIVO_MAP_BASE_URL` | `https://api.map.baidu.com` | 百度地图服务地址 |
 | `LUMIVO_MAP_TIMEOUT_MS` | `10000` | 百度地图请求超时毫秒数 |
 | `AI_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible 服务地址 |

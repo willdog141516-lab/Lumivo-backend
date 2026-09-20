@@ -26,7 +26,7 @@ class FakeChatClient:
 def make_client(chat_client: FakeChatClient) -> TestClient:
     return TestClient(
         create_app(
-            Settings(ai_model="test-model"),
+            Settings(ai_model="test-model", provider_mode="fixture", _env_file=None),
             chat_client=chat_client,
         )
     )
@@ -88,6 +88,37 @@ def test_chat_rejects_invalid_input_before_calling_provider():
         "error": {"code": "INVALID_REQUEST", "message": "message 不能为空"}
     }
     assert chat_client.calls == 0
+
+
+def test_unknown_endpoint_returns_not_found_error_code():
+    response = make_client(FakeChatClient()).get("/api/missing")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {"code": "NOT_FOUND", "message": "\u8bf7\u6c42\u7684\u63a5\u53e3\u4e0d\u5b58\u5728"}
+    }
+
+
+def test_unsupported_method_returns_method_not_allowed_error_code():
+    response = make_client(FakeChatClient()).get("/api/chat")
+
+    assert response.status_code == 405
+    assert response.json() == {
+        "error": {"code": "METHOD_NOT_ALLOWED", "message": "\u8bf7\u6c42\u65b9\u6cd5\u4e0d\u652f\u6301"}
+    }
+
+
+def test_oversized_body_returns_request_too_large_error_code():
+    response = make_client(FakeChatClient()).post(
+        "/api/chat",
+        content=b"x" * (64 * 1024 + 1),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {
+        "error": {"code": "REQUEST_TOO_LARGE", "message": "\u8bf7\u6c42\u4f53\u4e0d\u80fd\u8d85\u8fc7 64 KiB"}
+    }
 
 
 def test_nanjing_plan_returns_frontend_compatible_result():
@@ -169,7 +200,7 @@ def test_invalid_model_selection_is_not_playable():
 
 def test_full_real_without_baidu_key_does_not_fall_back_to_fixture():
     response = TestClient(
-        create_app(Settings(provider_mode="full-real"))
+        create_app(Settings(provider_mode="full-real", _env_file=None))
     ).post(
         "/api/trips/plan",
         json={"message": "南京一日游", "destination": "南京", "days": 1},
