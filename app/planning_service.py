@@ -4,10 +4,11 @@ import json
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Protocol
 
-from app.ai_client import ChatClient
+from app.ai_client import AiClientError, ChatClient
 from app.domain.chat import ChatRequest, TripPlanRequest, TripRevisionRequest
 from app.domain.trips import PlanningResult, TripPlan
 from app.fixtures_nanjing import nanjing_planning_result, nanjing_trip_plan
+from app.model_provider import ModelProviderError, TripIntent, extract_trip_intent_from_chat
 from app.planning_validator import validate_plan
 
 
@@ -27,6 +28,36 @@ async def emit_progress(
 ) -> None:
     if progress is not None:
         await progress(event, data or {})
+
+
+TripIntentExtractor = Callable[[TripPlanRequest], Awaitable[TripIntent]]
+
+
+async def resolve_trip_request(
+    request: TripPlanRequest,
+    extract_intent: TripIntentExtractor,
+) -> tuple[str, int]:
+    if request.destination is not None and request.days is not None:
+        return request.destination, request.days
+
+    try:
+        intent = await extract_intent(request)
+    except (AiClientError, ModelProviderError) as error:
+        raise TripPlannerError(error.code, str(error)) from None
+
+    destination = request.destination or intent.destination
+    days = request.days if request.days is not None else intent.days
+    missing = [
+        label
+        for label, value in (("目的地", destination), ("旅行天数", days))
+        if value is None
+    ]
+    if missing:
+        raise TripPlannerError(
+            "PLAN_INPUT_REQUIRED",
+            f"请在对话中补充{'、'.join(missing)}",
+        )
+    return destination, days
 
 
 class TripPlanner(Protocol):
@@ -143,24 +174,31 @@ class FixtureTripPlanner:
         *,
         progress: ProgressCallback | None = None,
     ) -> PlanningResult:
-        if any(marker in request.destination for marker in OVERSEAS_MARKERS):
+        async def extract_intent(plan_request: TripPlanRequest) -> TripIntent:
+            return await extract_trip_intent_from_chat(self._chat_client, plan_request)
+
+        resolved_destination, days = await resolve_trip_request(request, extract_intent)
+        resolved_request = request.model_copy(
+            update={"destination": resolved_destination, "days": days}
+        )
+        if any(marker in resolved_destination for marker in OVERSEAS_MARKERS):
             raise TripPlannerError("UNSUPPORTED_REGION", "暂不支持该地区，等待后续开发")
 
-        destination = request.destination.removesuffix("市")
-        if destination != "南京" or request.days != 3:
+        destination = resolved_destination.removesuffix("市")
+        if destination != "南京" or days != 3:
             raise TripPlannerError("PLAN_NOT_AVAILABLE", "当前目的地的可播放行程尚未接入")
 
         await emit_progress(
             progress,
             "destination.validated",
-            {"destination": request.destination},
+            {"destination": resolved_request.destination},
         )
-        prompt = build_fixture_selection_prompt(request)
+        prompt = build_fixture_selection_prompt(resolved_request)
         response = await self._chat_client.complete(
             ChatRequest(
                 message=prompt,
-                destination=request.destination,
-                days=request.days,
+                destination=resolved_request.destination,
+                days=resolved_request.days,
             )
         )
         plan = nanjing_trip_plan()

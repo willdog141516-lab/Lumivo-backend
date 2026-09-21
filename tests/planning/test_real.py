@@ -1,10 +1,12 @@
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
-from app.domain.chat import TripPlanRequest, TripRevisionRequest
-from app.domain.trips import GeoPoint, RouteLeg, VerifiedPoi
+from app.ai_client import AiClientError
+from app.domain.chat import ChatMessage, TripPlanRequest, TripRevisionRequest
+from app.domain.trips import GeoPoint, RouteLeg, TravelMode, VerifiedPoi
 from app.map_provider import PoiSearchQuery, ResolvedDestination, RouteRequest
 from app.model_provider import (
     NarrationRequest,
@@ -45,16 +47,27 @@ class FakeMapProvider:
                 "point": GeoPoint(lng=119.0, lat=32.2),
             }
         )
+        self.oriental_pearl = self.first.model_copy(
+            update={
+                "uid": "p4",
+                "name": "东方明珠广播电视塔",
+                "point": GeoPoint(lng=121.4997, lat=31.2397),
+            }
+        )
+        self.search_queries: list[PoiSearchQuery] = []
         self.route_calls = 0
+        self.route_modes = []
 
     async def resolve_destination(self, name: str) -> ResolvedDestination:
         return ResolvedDestination(name=name, point=self.first.point)
 
     async def search_pois(self, query: PoiSearchQuery) -> list[VerifiedPoi]:
-        return [self.first, self.second, self.third]
+        self.search_queries.append(query)
+        return [self.first, self.second, self.third, self.oriental_pearl]
 
     async def route(self, request: RouteRequest) -> RouteLeg:
         self.route_calls += 1
+        self.route_modes.append(request.mode)
         return RouteLeg(
             id=f"real-route-{request.from_poi.uid}-{request.to_poi.uid}",
             from_poi_uid=request.from_poi.uid,
@@ -71,7 +84,16 @@ class FakeMapProvider:
 
 
 class FakeModelProvider:
+    def __init__(self, intent: SimpleNamespace | None = None) -> None:
+        self.intent = intent
+        self.schedule_requests: list[ScheduleRequest] = []
+
+    async def extract_trip_intent(self, request: TripPlanRequest) -> SimpleNamespace:
+        assert self.intent is not None
+        return self.intent
+
     async def create_schedule(self, request: ScheduleRequest) -> ProposedSchedule:
+        self.schedule_requests.append(request)
         return ProposedSchedule(days=(PlannedDay(1, ("p1", "p2")),))
 
     async def create_narration(self, request: NarrationRequest) -> NarrationSet:
@@ -79,6 +101,26 @@ class FakeModelProvider:
 
     async def revise_day(self, request: RevisionRequest) -> ProposedRevision:
         return ProposedRevision(day_index=request.day_index, poi_uids=("p1", "p3"))
+
+
+class TwoDayFakeModelProvider(FakeModelProvider):
+    async def create_schedule(self, request: ScheduleRequest) -> ProposedSchedule:
+        self.schedule_requests.append(request)
+        return ProposedSchedule(
+            days=(
+                PlannedDay(1, ("p1",)),
+                PlannedDay(2, ("p2",)),
+            )
+        )
+
+    async def revise_day(self, request: RevisionRequest) -> ProposedRevision:
+        return ProposedRevision(day_index=request.day_index, poi_uids=("p2", "p4"))
+
+
+class NoNamedPoiMapProvider(FakeMapProvider):
+    async def search_pois(self, query: PoiSearchQuery) -> list[VerifiedPoi]:
+        self.search_queries.append(query)
+        return [self.first, self.second, self.third]
 
 
 class UnknownUidModelProvider(FakeModelProvider):
@@ -89,6 +131,49 @@ class UnknownUidModelProvider(FakeModelProvider):
 class UnknownRevisionUidModelProvider(FakeModelProvider):
     async def revise_day(self, request: RevisionRequest) -> ProposedRevision:
         return ProposedRevision(day_index=request.day_index, poi_uids=("unknown",))
+
+
+class NoopRevisionModelProvider(FakeModelProvider):
+    async def revise_day(self, request: RevisionRequest) -> ProposedRevision:
+        return ProposedRevision(
+            day_index=request.day_index,
+            poi_uids=request.current_poi_uids,
+        )
+
+
+class OverselectingRevisionModelProvider(FakeModelProvider):
+    async def revise_day(self, request: RevisionRequest) -> ProposedRevision:
+        return ProposedRevision(
+            day_index=request.day_index,
+            poi_uids=tuple(candidate.uid for candidate in request.candidates),
+        )
+
+
+class IntentFailureModelProvider(FakeModelProvider):
+    async def extract_trip_intent(self, request: TripPlanRequest):
+        raise AiClientError("AI_PROVIDER_ERROR", "provider unavailable")
+
+
+class ExplicitPoiVariantsMapProvider(FakeMapProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.exact_landmark = self.first.model_copy(
+            update={"uid": "p5", "name": "东方明珠"}
+        )
+        self.related_landmark = self.first.model_copy(
+            update={"uid": "p6", "name": "东方明珠公园"}
+        )
+
+    async def search_pois(self, query: PoiSearchQuery) -> list[VerifiedPoi]:
+        self.search_queries.append(query)
+        return [
+            self.first,
+            self.second,
+            self.third,
+            self.oriental_pearl,
+            self.exact_landmark,
+            self.related_landmark,
+        ]
 
 
 def test_real_planner_builds_timeline_from_provider_facts():
@@ -107,6 +192,46 @@ def test_real_planner_builds_timeline_from_provider_facts():
     assert result.timeline.trip_id == result.plan.id
     assert result.timeline.trip_version == result.plan.version
 
+
+def test_real_planner_translates_intent_provider_failure_to_structured_error():
+    with pytest.raises(TripPlannerError) as error:
+        asyncio.run(
+            RealTripPlanner(FakeMapProvider(), IntentFailureModelProvider()).plan(
+                TripPlanRequest(message="我想去上海玩两天")
+            )
+        )
+
+    assert error.value.code == "AI_PROVIDER_ERROR"
+
+
+def test_real_planner_uses_dialogue_intent_and_history_when_fields_are_missing():
+    model_provider = FakeModelProvider(SimpleNamespace(destination="成都", days=1))
+    result = asyncio.run(
+        RealTripPlanner(FakeMapProvider(), model_provider).plan(
+            TripPlanRequest(
+                message="请把上面的聊天生成成故事地图",
+                history=(
+                    ChatMessage(role="user", content="我想去成都玩一天，重点看老街"),
+                    ChatMessage(role="assistant", content="可以安排慢一点。"),
+                ),
+            )
+        )
+    )
+
+    assert result.plan.destination == "成都"
+    assert model_provider.schedule_requests[0].history[-1].content == "可以安排慢一点。"
+    assert "1日" in result.plan.summary
+
+def test_real_planner_does_not_guess_when_dialogue_lacks_trip_details():
+    planner = RealTripPlanner(
+        FakeMapProvider(),
+        FakeModelProvider(SimpleNamespace(destination=None, days=None)),
+    )
+
+    with pytest.raises(TripPlannerError) as error:
+        asyncio.run(planner.plan(TripPlanRequest(message="帮我做成故事地图")))
+
+    assert error.value.code == "PLAN_INPUT_REQUIRED"
 
 def test_real_planner_reports_progress_in_order():
     events: list[str] = []
@@ -154,6 +279,113 @@ def test_real_planner_revises_one_day_with_a_provider_candidate():
     assert revised.timeline.trip_version == revised.plan.version
 
 
+def test_real_planner_keeps_an_explicit_poi_request_in_the_target_day():
+    map_provider = FakeMapProvider()
+    planner = RealTripPlanner(map_provider, TwoDayFakeModelProvider())
+    original = asyncio.run(
+        planner.plan(TripPlanRequest(message="成都二日游", destination="成都", days=2))
+    )
+
+    revised = asyncio.run(
+        planner.revise(
+            TripRevisionRequest(
+                plan=original.plan,
+                day=2,
+                instruction="第二天我想去东方明珠玩",
+            )
+        )
+    )
+
+    assert [stop.poi.uid for stop in revised.plan.days[1].stops] == ["p2", "p4"]
+    assert map_provider.search_queries[-1].keywords[0] == "东方明珠"
+
+
+def test_real_planner_limits_positive_poi_revision_to_named_and_current_pois():
+    planner = RealTripPlanner(
+        FakeMapProvider(),
+        OverselectingRevisionModelProvider(),
+    )
+    original = asyncio.run(
+        planner.plan(TripPlanRequest(message="成都一日游", destination="成都", days=1))
+    )
+
+    revised = asyncio.run(
+        planner.revise(
+            TripRevisionRequest(
+                plan=original.plan,
+                day=1,
+                instruction="我想去东方明珠看看",
+            )
+        )
+    )
+
+    assert [stop.poi.uid for stop in revised.plan.days[0].stops] == ["p1", "p2", "p4"]
+
+
+def test_real_planner_chooses_one_canonical_candidate_for_named_poi():
+    planner = RealTripPlanner(
+        ExplicitPoiVariantsMapProvider(), OverselectingRevisionModelProvider()
+    )
+    original = asyncio.run(
+        planner.plan(TripPlanRequest(message="成都一日游", destination="成都", days=1))
+    )
+
+    revised = asyncio.run(
+        planner.revise(
+            TripRevisionRequest(
+                plan=original.plan,
+                day=1,
+                instruction="我想去东方明珠看看",
+            )
+        )
+    )
+
+    assert [stop.poi.uid for stop in revised.plan.days[0].stops] == ["p1", "p2", "p5"]
+
+
+@pytest.mark.parametrize("instruction", ["真实终点我不想去", "我不想去真实终点"])
+def test_real_planner_removes_a_poi_when_the_instruction_rejects_it(instruction: str):
+    planner = RealTripPlanner(FakeMapProvider(), FakeModelProvider())
+    original = asyncio.run(
+        planner.plan(TripPlanRequest(message="成都一日游", destination="成都", days=1))
+    )
+
+    revised = asyncio.run(
+        planner.revise(
+            TripRevisionRequest(
+                plan=original.plan,
+                day=1,
+                instruction=instruction,
+            )
+        )
+    )
+
+    assert [stop.poi.uid for stop in revised.plan.days[0].stops] == ["p1", "p3"]
+
+
+def test_real_planner_does_not_randomize_when_named_poi_is_outside_destination():
+    map_provider = NoNamedPoiMapProvider()
+    planner = RealTripPlanner(map_provider, TwoDayFakeModelProvider())
+    original = asyncio.run(
+        planner.plan(TripPlanRequest(message="成都二日游", destination="成都", days=2))
+    )
+    route_calls_after_plan = map_provider.route_calls
+
+    with pytest.raises(TripPlannerError) as error:
+        asyncio.run(
+            planner.revise(
+                TripRevisionRequest(
+                    plan=original.plan,
+                    day=2,
+                    instruction="第二天我想去东方明珠玩",
+                )
+            )
+        )
+
+    assert error.value.code == "POI_NOT_FOUND"
+    assert map_provider.route_calls == route_calls_after_plan
+
+
 def test_real_planner_rejects_unknown_uid_before_route_lookup():
     map_provider = FakeMapProvider()
 
@@ -189,3 +421,44 @@ def test_real_planner_rejects_unknown_revision_uid_before_route_lookup():
 
     assert error.value.code == "MODEL_OUTPUT_INVALID"
     assert map_provider.route_calls == route_calls_after_plan
+
+def test_real_planner_rejects_revision_that_keeps_the_same_route():
+    map_provider = FakeMapProvider()
+    planner = RealTripPlanner(map_provider, NoopRevisionModelProvider())
+    original = asyncio.run(
+        planner.plan(TripPlanRequest(message="成都一日游", destination="成都", days=1))
+    )
+    route_calls_after_plan = map_provider.route_calls
+
+    with pytest.raises(TripPlannerError) as error:
+        asyncio.run(
+            planner.revise(
+                TripRevisionRequest(
+                    plan=original.plan,
+                    day=1,
+                    instruction="换一个景点",
+                )
+            )
+        )
+
+    assert error.value.code == "MODEL_OUTPUT_INVALID"
+    assert map_provider.route_calls == route_calls_after_plan
+
+
+class TransitModelProvider(FakeModelProvider):
+    async def create_schedule(self, request: ScheduleRequest) -> ProposedSchedule:
+        return ProposedSchedule(
+            days=(PlannedDay(1, ("p1", "p2"), (TravelMode.TRANSIT,)),)
+        )
+
+
+def test_real_planner_routes_each_leg_with_the_ai_selected_transport_mode():
+    map_provider = FakeMapProvider()
+    result = asyncio.run(
+        RealTripPlanner(map_provider, TransitModelProvider()).plan(
+            TripPlanRequest(message="成都一日游", destination="成都", days=1)
+        )
+    )
+
+    assert map_provider.route_modes == [TravelMode.TRANSIT]
+    assert result.plan.days[0].route_legs[0].mode is TravelMode.TRANSIT

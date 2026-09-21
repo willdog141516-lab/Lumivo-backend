@@ -123,9 +123,10 @@ class TravelMode(StrEnum):
 
 
 class TripRequest(BaseModel):
-    destination: str
-    days: int = Field(ge=1, le=14)
+    destination: str | None = None
+    days: int | None = Field(default=None, ge=1, le=30)
     message: str
+    history: list[ChatMessage] = Field(default_factory=list)
     departure: str | None = None
     start_date: date | None = None
     interests: list[str] = Field(default_factory=list)
@@ -240,12 +241,11 @@ The validator returns a new validated model or raises structured domain errors. 
 
 ## 9. Story compilation
 
-StoryCompiler is deterministic for the same TripPlan ID and version. It creates:
+StoryCompiler is deterministic for the same TripPlan ID and version. The current local playback windows are a 1,000 ms introduction, 8,000 ms per day, and a 2,000 ms closing chapter. Intro, day, and closing commands are scaled to remain inside their chapter windows. The compiler creates:
 
 1. An introduction chapter focused on the globe.
-2. A projection transition and city camera flight.
-3. Day and route chapters with POI display, route draw, route follow, and narration commands.
-4. A closing chapter.
+2. Day and route chapters with POI display, route draw, route follow, and narration commands.
+3. A closing chapter.
 
 Animation durations are presentation durations, not real travel durations. Route commands reference route-leg IDs; the frontend prepares its MapStage using the returned TripPlan before playback.
 
@@ -275,7 +275,7 @@ The canonical NDJSON flow is now the frontend planning path; these routes remain
 
 ### `POST /api/v1/trips/plan`
 
-Accepts `TripRequest` and returns `application/x-ndjson`. Each line is one event envelope:
+Accepts `TripRequest` and returns `application/x-ndjson`. `destination` and `days` are optional when the full dialogue explicitly supplies both; otherwise planning returns `PLAN_INPUT_REQUIRED` rather than guessing. Each line is one event envelope:
 
 ```json
 {"requestId":"req_123","sequence":1,"type":"planning.started","message":"开始规划行程","data":null}
@@ -285,7 +285,7 @@ The final `planning.completed` event contains `{ "plan": TripPlan, "timeline": S
 
 ### `POST /api/v1/trips/revise`
 
-Accepts the complete current TripPlan and a revision instruction. It returns a new plan with the same ID, incremented version, and a matching newly compiled timeline. No server-side session is required.
+Accepts the complete current TripPlan and a revision instruction. It searches for explicitly named POIs first and includes matching verified candidates in the target day; if a named POI is unavailable in the current destination it returns `POI_NOT_FOUND` instead of substituting a random POI. It returns a new plan with the same ID, incremented version, and a matching newly compiled timeline; the target day must actually change its POI order or transport modes. No server-side session is required.
 
 The event sequence is strictly increasing per request. Client disconnect cancels remaining provider work where cancellation is supported.
 
@@ -309,6 +309,7 @@ MVP error codes are:
 - `AI_PROVIDER_ERROR`
 - `AI_PROVIDER_TIMEOUT`
 - `UNSUPPORTED_REGION`
+- `PLAN_INPUT_REQUIRED`
 - `PLAN_NOT_AVAILABLE`
 - `POI_NOT_FOUND`
 - `ROUTE_UNAVAILABLE`

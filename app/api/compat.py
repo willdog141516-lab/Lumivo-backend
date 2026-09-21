@@ -78,6 +78,7 @@ def _planner_failure(error: TripPlannerError) -> JSONResponse:
         "MAP_PROVIDER_TIMEOUT": "百度地图服务响应超时，请稍后重试",
         "MAP_PROVIDER_ERROR": "百度地图服务暂时不可用，请检查地图配置后重试",
         "MODEL_OUTPUT_INVALID": "AI 返回的行程选择无法通过校验",
+        "PLAN_INPUT_REQUIRED": "请补充目的地和旅行天数",
     }
     status = 503 if error.code in {
         "MODEL_OUTPUT_INVALID",

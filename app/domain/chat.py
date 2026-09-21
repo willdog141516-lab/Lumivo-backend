@@ -46,8 +46,8 @@ class ChatRequest(BaseModel):
 
 
 class TripPlanRequest(ChatRequest):
-    destination: str = Field(min_length=1, max_length=100)
-    days: int = Field(ge=1, le=30)
+    destination: str | None = Field(default=None, max_length=100)
+    days: int | None = Field(default=None, ge=1, le=30)
 
 
 class TripRevisionRequest(BaseModel):

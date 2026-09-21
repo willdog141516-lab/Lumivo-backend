@@ -21,8 +21,8 @@ Python 兼容后端已接管前端当前使用的本地接口：
 
 ### 规范规划流
 
-- `POST /api/v1/trips/plan`：接受规划请求，返回逐行 NDJSON 进度和最终 `PlanningResult`。
-- `POST /api/v1/trips/revise`：接受当前完整 `TripPlan`、目标天数和修订指令，返回新版本的规划结果。
+- `POST /api/v1/trips/plan`：接受消息与完整聊天记录；目的地和天数可显式传入，或只从对话中明确提到的信息提取，缺失时返回 `PLAN_INPUT_REQUIRED`。返回逐行 NDJSON 进度和最终 `PlanningResult`。
+- `POST /api/v1/trips/revise`：接受当前完整 `TripPlan`、目标天数和修订指令；用户明确点名的候选 POI 会被纳入目标日，当前目的地找不到时返回 `POI_NOT_FOUND`，不会随机替换。
 - 前端 `TripClient` 已消费这两个接口；旧的 `/api/chat` 和 `/api/trips/plan` 保留为兼容接口。
 
 ## 本地启动
@@ -68,7 +68,7 @@ python -m pytest
 
 前端 `E:\code\Lumivo-AI\lumivo-ai` 默认请求 `http://localhost:8000`，因此启动本服务后无需修改前端请求地址。
 
-`POST /api/chat` 接受 `message`、可选 `history`、`destination` 和 `days`。请求带 `Accept: text/event-stream` 或 `?stream=true` 时返回 SSE：`delta` 事件携带增量文本，最后是 `done` 事件；不带流式标记时仍返回原 JSON 契约。`POST /api/trips/plan` 接受 `message`、`destination` 和 `days`；`fixture` 模式返回南京三日 fixture，`full-real` 模式调用百度真实 POI/路线并返回相同的 `plan` 与 `timeline`。无百度 AK、无可用 POI、无可用路线或模型输出不符合 UID 约束时返回结构化错误，不会回退为假数据。
+`POST /api/chat` 接受 `message`、可选 `history`、`destination` 和 `days`。请求带 `Accept: text/event-stream` 或 `?stream=true` 时返回 SSE：`delta` 事件携带增量文本，最后是 `done` 事件；不带流式标记时仍返回原 JSON 契约。`POST /api/trips/plan` 接受 `message`、可选 `history`、`destination` 和 `days`；缺失的目的地或天数仅从对话中明确提到的信息提取，否则返回 `PLAN_INPUT_REQUIRED`。`fixture` 模式返回南京三日 fixture，`full-real` 模式调用百度真实 POI/路线并返回相同的 `plan` 与 `timeline`。无百度 AK、无可用 POI、无可用路线或模型输出不符合 UID 约束时返回结构化错误，不会回退为假数据。
 
 ## 真实数据模式
 

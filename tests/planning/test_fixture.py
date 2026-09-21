@@ -16,7 +16,25 @@ def test_fixture_plan_is_valid_and_timeline_identity_matches():
     validate_plan(result.plan)
     assert result.timeline.trip_id == result.plan.id
     assert result.timeline.trip_version == result.plan.version
-    assert result.timeline.total_duration_ms == 49400
+    assert result.timeline.chapters[0].duration_ms == 1_000
+    assert [chapter.duration_ms for chapter in result.timeline.chapters[1:-1]] == [
+        8_000,
+        8_000,
+        8_000,
+    ]
+    assert result.timeline.chapters[-1].duration_ms == 2_000
+    assert result.timeline.total_duration_ms == 27_000
+
+
+def test_compiler_keeps_commands_inside_their_chapter_windows():
+    result = nanjing_planning_result()
+
+    for chapter in result.timeline.chapters:
+        chapter_end = chapter.start_ms + chapter.duration_ms
+        assert all(
+            command.start_ms + command.duration_ms <= chapter_end
+            for command in chapter.commands
+        )
 
 
 def test_compiler_emits_playable_route_commands_for_fixture():
@@ -33,13 +51,22 @@ def test_compiler_emits_playable_route_commands_for_fixture():
     }
 
 
-def test_compiler_uses_the_plan_day_count_in_the_intro_narration():
+def test_compiler_scales_intro_animation_to_its_chapter_window():
     result = nanjing_planning_result()
-    one_day_plan = result.plan.model_copy(update={"days": result.plan.days[:1]})
+    timeline = compile_timeline(result.plan)
+    intro = timeline.chapters[0]
 
-    intro_text = compile_timeline(one_day_plan).chapters[0].commands[-1].payload["text"]
-
-    assert intro_text == "南京一日行程，从夫子庙-秦淮风光带开始。"
+    assert intro.id == "chapter-intro"
+    assert intro.duration_ms == 1_000
+    assert [command.type.value for command in intro.commands] == [
+        "stage.clear",
+        "globe.focus",
+        "projection.toFlat",
+        "camera.flyTo",
+        "narration.show",
+    ]
+    assert intro.commands[-1].payload["text"] == "南京三日行程，从夫子庙-秦淮风光带开始。"
+    assert timeline.chapters[1].start_ms == 1_000
 
 
 def test_validator_rejects_route_endpoint_mismatch():

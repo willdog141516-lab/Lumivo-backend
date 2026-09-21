@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.ai_client import ChatClient
-from app.domain.chat import ChatRequest
-from app.domain.trips import VerifiedPoi
+from app.domain.chat import ChatMessage, ChatRequest, TripPlanRequest
+from app.domain.trips import TravelMode, VerifiedPoi
 
 
 class ModelProviderError(Exception):
@@ -30,6 +30,7 @@ class ScheduleRequest:
     days: int
     message: str
     candidates: tuple[ScheduleCandidate, ...]
+    history: tuple[ChatMessage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,7 @@ class RevisionRequest:
 class PlannedDay:
     day_index: int
     poi_uids: tuple[str, ...]
+    transport_modes: tuple[TravelMode, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +58,7 @@ class ProposedSchedule:
 class ProposedRevision:
     day_index: int
     poi_uids: tuple[str, ...]
+    transport_modes: tuple[TravelMode, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +72,16 @@ class NarrationSet:
     by_poi_uid: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class TripIntent:
+    destination: str | None
+    days: int | None
+
+
 class ModelProvider(Protocol):
     async def create_schedule(self, request: ScheduleRequest) -> ProposedSchedule: ...
+    async def extract_trip_intent(self, request: TripPlanRequest) -> TripIntent: ...
+
 
     async def revise_day(self, request: RevisionRequest) -> ProposedRevision: ...
 
@@ -93,6 +104,26 @@ def _object(content: str) -> dict[str, object]:
 def _exact_keys(value: dict[str, object], keys: set[str]) -> bool:
     return set(value) == keys
 
+def parse_trip_intent(content: str) -> TripIntent:
+    value = _object(content)
+    if not _exact_keys(value, {"destination", "days"}):
+        raise _invalid()
+
+    destination = value["destination"]
+    days = value["days"]
+    if destination is not None and (
+        not isinstance(destination, str) or not destination.strip()
+    ):
+        raise _invalid()
+    if days is not None and (
+        not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 30
+    ):
+        raise _invalid()
+    return TripIntent(
+        destination=destination.strip() if isinstance(destination, str) else None,
+        days=days if isinstance(days, int) else None,
+    )
+
 
 def _invalid() -> ModelProviderError:
     return ModelProviderError("MODEL_OUTPUT_INVALID", INVALID_MODEL_OUTPUT)
@@ -111,10 +142,11 @@ def parse_schedule(content: str, request: ScheduleRequest) -> ProposedSchedule:
     seen_uids: set[str] = set()
     days: list[PlannedDay] = []
     for raw_day in raw_days:
-        if not isinstance(raw_day, dict) or not _exact_keys(raw_day, {"day", "poiUids"}):
+        if not isinstance(raw_day, dict) or not _exact_keys(raw_day, {"day", "poiUids", "transportModes"}):
             raise _invalid()
         day = raw_day["day"]
         poi_uids = raw_day["poiUids"]
+        transport_modes = raw_day["transportModes"]
         if (
             not isinstance(day, int)
             or isinstance(day, bool)
@@ -122,16 +154,23 @@ def parse_schedule(content: str, request: ScheduleRequest) -> ProposedSchedule:
             or day > request.days
             or day in seen_days
             or not isinstance(poi_uids, list)
+            or not isinstance(transport_modes, list)
             or not poi_uids
             or any(not isinstance(uid, str) or not uid for uid in poi_uids)
         ):
             raise _invalid()
         uid_tuple = tuple(poi_uids)
+        try:
+            mode_tuple = tuple(TravelMode(mode) for mode in transport_modes)
+        except (TypeError, ValueError):
+            raise _invalid() from None
+        if len(mode_tuple) != len(uid_tuple) - 1:
+            raise _invalid()
         if any(uid not in candidate_uids or uid in seen_uids for uid in uid_tuple):
             raise _invalid()
         seen_days.add(day)
         seen_uids.update(uid_tuple)
-        days.append(PlannedDay(day_index=day, poi_uids=uid_tuple))
+        days.append(PlannedDay(day_index=day, poi_uids=uid_tuple, transport_modes=mode_tuple))
 
     if seen_days != set(range(1, request.days + 1)):
         raise _invalid()
@@ -140,10 +179,11 @@ def parse_schedule(content: str, request: ScheduleRequest) -> ProposedSchedule:
 
 def parse_revision(content: str, request: RevisionRequest) -> ProposedRevision:
     value = _object(content)
-    if not _exact_keys(value, {"day", "poiUids"}):
+    if not _exact_keys(value, {"day", "poiUids", "transportModes"}):
         raise _invalid()
     day = value["day"]
     poi_uids = value["poiUids"]
+    transport_modes = value["transportModes"]
     if (
         not isinstance(day, int)
         or isinstance(day, bool)
@@ -151,17 +191,28 @@ def parse_revision(content: str, request: RevisionRequest) -> ProposedRevision:
         or not isinstance(poi_uids, list)
         or not poi_uids
         or any(not isinstance(uid, str) or not uid for uid in poi_uids)
+        or not isinstance(transport_modes, list)
     ):
         raise _invalid()
 
     uid_tuple = tuple(poi_uids)
+    try:
+        mode_tuple = tuple(TravelMode(mode) for mode in transport_modes)
+    except (TypeError, ValueError):
+        raise _invalid() from None
+    if len(mode_tuple) != len(uid_tuple) - 1:
+        raise _invalid()
+
     candidate_uids = {candidate.uid for candidate in request.candidates}
     if len(set(uid_tuple)) != len(uid_tuple) or any(
         uid not in candidate_uids for uid in uid_tuple
     ):
         raise _invalid()
-    return ProposedRevision(day_index=day, poi_uids=uid_tuple)
-
+    return ProposedRevision(
+        day_index=day,
+        poi_uids=uid_tuple,
+        transport_modes=mode_tuple,
+    )
 
 def _normalized_name_anchor(value: str) -> str:
     return re.sub(r"[\s·—–-]+", "", value)
@@ -210,6 +261,35 @@ def parse_narration(content: str, request: NarrationRequest) -> NarrationSet:
     return NarrationSet(by_poi_uid=narrations)
 
 
+def _dialogue_text(
+    history: tuple[ChatMessage, ...] | list[ChatMessage],
+    message: str,
+) -> str:
+    messages = [*history, ChatMessage(role="user", content=message)]
+    return "\n".join(f"{item.role}: {item.content}" for item in messages)
+
+
+def _trip_intent_prompt(request: TripPlanRequest) -> str:
+    return "\n".join(
+        (
+            "从下面的旅行对话中提取目的地和旅行天数。",
+            "只使用用户明确说过的信息，不要猜测；没有明确提及时返回 null。",
+            f"对话：{_dialogue_text(request.history, request.message)}",
+            '只返回严格 JSON：{"destination":"成都","days":3}，未知字段使用 null。',
+        )
+    )
+
+
+async def extract_trip_intent_from_chat(
+    chat_client: ChatClient,
+    request: TripPlanRequest,
+) -> TripIntent:
+    response = await chat_client.complete(
+        ChatRequest(message=_trip_intent_prompt(request))
+    )
+    return parse_trip_intent(response.message.content)
+
+
 def _schedule_prompt(request: ScheduleRequest) -> str:
     candidates = [
         {
@@ -225,11 +305,12 @@ def _schedule_prompt(request: ScheduleRequest) -> str:
             "你负责为真实地图 POI 排列旅行日程。",
             f"目的地：{request.destination}",
             f"天数：{request.days}",
-            f"用户需求：{request.message}",
+            f"用户对话：{_dialogue_text(request.history, request.message)}",
             "只能使用候选列表中的 uid，每个 uid 最多使用一次；每天至少一个 POI。",
+            "每个 day 必须返回与相邻 POI 数量相同的 transportModes 数组，元素仅能为 walk、transit、drive、ride。",
             "不要输出坐标、路线、距离、时长、营业时间或候选列表之外的事实。",
             f"候选列表：{json.dumps(candidates, ensure_ascii=False)}",
-            '只返回严格 JSON：{"days":[{"day":1,"poiUids":["候选uid"]}]}',
+            '只返回严格 JSON：{"days":[{"day":1,"poiUids":["候选uid"],"transportModes":[]}]}',
         )
     )
 
@@ -274,8 +355,11 @@ def _revision_prompt(request: RevisionRequest) -> str:
             f"用户修改要求：{request.instruction}",
             f"当前 POI uid：{json.dumps(request.current_poi_uids, ensure_ascii=False)}",
             "只能返回候选列表中的 uid，不得输出坐标、路线、距离、时长或候选列表之外的事实。",
+            "如果用户修改要求中明确提到候选 POI 名称，必须把该 POI 的 uid 放入 poiUids，不得用其他地点替代。",
+            "如果用户要求换地方、换景点或调整路线，至少替换一个当前 POI；不要原样返回当前路线。只调整交通方式或节奏时可以保留 POI。",
+            "transportModes 长度必须比 poiUids 少一，元素仅能为 walk、transit、drive、ride。",
             f"候选列表：{json.dumps(candidates, ensure_ascii=False)}",
-            '只返回严格 JSON：{"day":2,"poiUids":["候选uid"]}，day 必须等于目标天数。',
+            f'只返回严格 JSON：{{"day":{request.day_index},"poiUids":["候选uid"],"transportModes":[]}}，day 必须等于目标天数。',
         )
     )
 
@@ -283,6 +367,10 @@ def _revision_prompt(request: RevisionRequest) -> str:
 class OpenAIModelAdapter:
     def __init__(self, chat_client: ChatClient) -> None:
         self._chat_client = chat_client
+
+    async def extract_trip_intent(self, request: TripPlanRequest) -> TripIntent:
+        return await extract_trip_intent_from_chat(self._chat_client, request)
+
 
     async def create_schedule(self, request: ScheduleRequest) -> ProposedSchedule:
         response = await self._chat_client.complete(

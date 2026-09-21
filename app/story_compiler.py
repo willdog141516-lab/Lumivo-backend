@@ -2,9 +2,12 @@ from app.domain.story import StoryChapter, StoryCommand, StoryCommandType, Story
 from app.domain.trips import TripDay, TripPlan
 
 
-INTRO_DURATION_MS = 5_200
-DAY_DURATION_MS = 13_800
-CLOSING_DURATION_MS = 2_800
+INTRO_DURATION_MS = 1_000
+DAY_DURATION_MS = 8_000
+CLOSING_DURATION_MS = 2_000
+INTRO_LAYOUT_DURATION_MS = 5_200
+DAY_LAYOUT_DURATION_MS = 13_800
+CLOSING_LAYOUT_DURATION_MS = 2_800
 
 
 def _ordinal(day: int) -> str:
@@ -31,6 +34,10 @@ def _command(
     )
 
 
+def _scale_ms(value: int, source_duration_ms: int, target_duration_ms: int) -> int:
+    return round(value * target_duration_ms / source_duration_ms)
+
+
 def _day_chapter(plan: TripPlan, day: TripDay, start_ms: int) -> StoryChapter:
     chapter_id = f"chapter-day-{day.day_index}"
     commands: list[StoryCommand] = []
@@ -41,7 +48,7 @@ def _day_chapter(plan: TripPlan, day: TripDay, start_ms: int) -> StoryChapter:
             len(commands),
             StoryCommandType.POI_SHOW,
             start_ms,
-            300,
+            _scale_ms(300, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS),
             {"poiUid": first.poi.uid},
         )
     )
@@ -50,22 +57,22 @@ def _day_chapter(plan: TripPlan, day: TripDay, start_ms: int) -> StoryChapter:
             chapter_id,
             len(commands),
             StoryCommandType.NARRATION_SHOW,
-            start_ms + 300,
-            1_800,
+            start_ms + _scale_ms(300, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS),
+            _scale_ms(1_800, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS),
             {"text": first.narration or "", "poiUid": first.poi.uid},
         )
     )
 
     for index, leg in enumerate(day.route_legs):
-        offset = index * 4_700
+        offset = _scale_ms(index * 4_700, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS)
         destination = day.stops[index + 1]
         commands.append(
             _command(
                 chapter_id,
                 len(commands),
                 StoryCommandType.ROUTE_DRAW,
-                start_ms + 2_100 + offset,
-                800,
+                start_ms + _scale_ms(2_100, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS) + offset,
+                _scale_ms(800, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS),
                 {"routeLegId": leg.id},
             )
         )
@@ -74,8 +81,12 @@ def _day_chapter(plan: TripPlan, day: TripDay, start_ms: int) -> StoryChapter:
                 chapter_id,
                 len(commands),
                 StoryCommandType.ROUTE_FOLLOW,
-                start_ms + 2_900 + offset,
-                1_700 if index == 0 else 1_600,
+                start_ms + _scale_ms(2_900, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS) + offset,
+                _scale_ms(
+                    1_700 if index == 0 else 1_600,
+                    DAY_LAYOUT_DURATION_MS,
+                    DAY_DURATION_MS,
+                ),
                 {"routeLegId": leg.id},
                 "easeInOut",
             )
@@ -85,8 +96,8 @@ def _day_chapter(plan: TripPlan, day: TripDay, start_ms: int) -> StoryChapter:
                 chapter_id,
                 len(commands),
                 StoryCommandType.POI_SHOW,
-                start_ms + 4_600 + offset,
-                300,
+                start_ms + _scale_ms(4_600, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS) + offset,
+                _scale_ms(300, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS),
                 {"poiUid": destination.poi.uid},
             )
         )
@@ -95,8 +106,12 @@ def _day_chapter(plan: TripPlan, day: TripDay, start_ms: int) -> StoryChapter:
                 chapter_id,
                 len(commands),
                 StoryCommandType.NARRATION_SHOW,
-                start_ms + 4_900 + offset,
-                2_500 if index == len(day.route_legs) - 1 else 1_900,
+                start_ms + _scale_ms(4_900, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS) + offset,
+                _scale_ms(
+                    2_500 if index == len(day.route_legs) - 1 else 1_900,
+                    DAY_LAYOUT_DURATION_MS,
+                    DAY_DURATION_MS,
+                ),
                 {"text": destination.narration or "", "poiUid": destination.poi.uid},
             )
         )
@@ -106,8 +121,8 @@ def _day_chapter(plan: TripPlan, day: TripDay, start_ms: int) -> StoryChapter:
             chapter_id,
             len(commands),
             StoryCommandType.CHAPTER_PAUSE,
-            start_ms + 12_000,
-            1_800,
+            start_ms + _scale_ms(12_000, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS),
+            _scale_ms(1_800, DAY_LAYOUT_DURATION_MS, DAY_DURATION_MS),
         )
     )
     return StoryChapter(
@@ -128,13 +143,13 @@ def compile_timeline(plan: TripPlan) -> StoryTimeline:
             start_ms=0,
             duration_ms=INTRO_DURATION_MS,
             commands=[
-                _command("chapter-intro", 0, StoryCommandType.STAGE_CLEAR, 0, 300),
+                _command("chapter-intro", 0, StoryCommandType.STAGE_CLEAR, 0, _scale_ms(300, INTRO_LAYOUT_DURATION_MS, INTRO_DURATION_MS)),
                 _command(
                     "chapter-intro",
                     1,
                     StoryCommandType.GLOBE_FOCUS,
                     0,
-                    1_800,
+                    _scale_ms(1_800, INTRO_LAYOUT_DURATION_MS, INTRO_DURATION_MS),
                     {"target": first_stop.poi.point.model_dump(mode="json")},
                     "easeInOut",
                 ),
@@ -142,16 +157,16 @@ def compile_timeline(plan: TripPlan) -> StoryTimeline:
                     "chapter-intro",
                     2,
                     StoryCommandType.PROJECTION_TO_FLAT,
-                    1_800,
-                    1_000,
+                    _scale_ms(1_800, INTRO_LAYOUT_DURATION_MS, INTRO_DURATION_MS),
+                    _scale_ms(1_000, INTRO_LAYOUT_DURATION_MS, INTRO_DURATION_MS),
                     easing="easeInOut",
                 ),
                 _command(
                     "chapter-intro",
                     3,
                     StoryCommandType.CAMERA_FLY_TO,
-                    2_800,
-                    1_800,
+                    _scale_ms(2_800, INTRO_LAYOUT_DURATION_MS, INTRO_DURATION_MS),
+                    _scale_ms(1_800, INTRO_LAYOUT_DURATION_MS, INTRO_DURATION_MS),
                     {"target": first_stop.poi.point.model_dump(mode="json"), "zoom": 14},
                     "easeInOut",
                 ),
@@ -159,8 +174,8 @@ def compile_timeline(plan: TripPlan) -> StoryTimeline:
                     "chapter-intro",
                     4,
                     StoryCommandType.NARRATION_SHOW,
-                    3_900,
-                    1_200,
+                    _scale_ms(3_900, INTRO_LAYOUT_DURATION_MS, INTRO_DURATION_MS),
+                    _scale_ms(1_200, INTRO_LAYOUT_DURATION_MS, INTRO_DURATION_MS),
                     {"text": f"{plan.destination}{_ordinal(len(plan.days))}日行程，从{first_stop.poi.name}开始。"},
                 ),
             ],
@@ -171,6 +186,11 @@ def compile_timeline(plan: TripPlan) -> StoryTimeline:
         chapters.append(_day_chapter(plan, day, INTRO_DURATION_MS + index * DAY_DURATION_MS))
 
     closing_start = INTRO_DURATION_MS + len(plan.days) * DAY_DURATION_MS
+    closing_narration_duration = _scale_ms(
+        1_800,
+        CLOSING_LAYOUT_DURATION_MS,
+        CLOSING_DURATION_MS,
+    )
     chapters.append(
         StoryChapter(
             id="chapter-closing",
@@ -183,15 +203,15 @@ def compile_timeline(plan: TripPlan) -> StoryTimeline:
                     0,
                     StoryCommandType.NARRATION_SHOW,
                     closing_start,
-                    1_800,
+                    closing_narration_duration,
                     {"text": f"这段{plan.destination}行程，从城市故事开始，也在城市故事中闭合。"},
                 ),
                 _command(
                     "chapter-closing",
                     1,
                     StoryCommandType.CHAPTER_PAUSE,
-                    closing_start + 1_800,
-                    1_000,
+                    closing_start + closing_narration_duration,
+                    CLOSING_DURATION_MS - closing_narration_duration,
                 ),
             ],
         )

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
 from app.domain.chat import TripPlanRequest, TripRevisionRequest
+from app.ai_client import AiClientError
 from app.domain.trips import PlanningResult
 from app.planning_service import ProgressCallback, TripPlanner, TripPlannerError
 
@@ -26,11 +27,17 @@ PLANNER_MESSAGES = {
     "MODEL_PROVIDER_TIMEOUT": "AI 服务响应超时，请稍后重试",
     "MODEL_OUTPUT_INVALID": "AI 返回的行程选择无法通过校验",
     "PLAN_INCOMPLETE": "行程不完整，无法播放",
+    "PLAN_INPUT_REQUIRED": "请补充目的地和旅行天数",
+    "AI_NOT_CONFIGURED": "AI 服务尚未配置",
+    "AI_PROVIDER_ERROR": "AI 服务暂时不可用，请稍后重试",
+    "AI_PROVIDER_TIMEOUT": "AI 服务响应超时，请稍后重试",
 }
 RETRYABLE_CODES = {
     "MAP_PROVIDER_TIMEOUT",
     "MAP_PROVIDER_ERROR",
     "MODEL_PROVIDER_TIMEOUT",
+    "AI_PROVIDER_ERROR",
+    "AI_PROVIDER_TIMEOUT",
 }
 
 
@@ -57,7 +64,7 @@ async def _parse(
         return _error(400, "INVALID_REQUEST", _validation_message(error))
 
 
-def _safe_error(error: TripPlannerError | None) -> dict[str, object]:
+def _safe_error(error: TripPlannerError | AiClientError | None) -> dict[str, object]:
     code = error.code if error is not None and error.code in PLANNER_MESSAGES else "INTERNAL_ERROR"
     message = PLANNER_MESSAGES.get(code, "服务器内部错误")
     return {
@@ -104,6 +111,8 @@ async def _stream_events(
             await queue.put(("complete", result))
         except TripPlannerError as error:
             await queue.put(("error", error))
+        except AiClientError as error:
+            await queue.put(("error", error))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -146,7 +155,11 @@ async def _stream_events(
                 )
                 sequence += 1
             elif kind == "error":
-                error = payload if isinstance(payload, TripPlannerError) else None
+                error = (
+                    payload
+                    if isinstance(payload, (TripPlannerError, AiClientError))
+                    else None
+                )
                 yield _line(
                     "planning.error",
                     request_id,
