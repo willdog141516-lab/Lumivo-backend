@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Protocol
 
 from app.ai_client import AiClientError, ChatClient
-from app.domain.chat import ChatRequest, TripPlanRequest, TripRevisionRequest
+from app.domain.chat import (
+    ChatRequest,
+    TripPlanRequest,
+    TripRerouteRequest,
+    TripRevisionRequest,
+)
 from app.domain.trips import PlanningResult, TripPlan
 from app.fixtures_nanjing import nanjing_planning_result, nanjing_trip_plan
 from app.model_provider import ModelProviderError, TripIntent, extract_trip_intent_from_chat
@@ -71,6 +76,13 @@ class TripPlanner(Protocol):
     async def revise(
         self,
         request: TripRevisionRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult: ...
+
+    async def reroute(
+        self,
+        request: TripRerouteRequest,
         *,
         progress: ProgressCallback | None = None,
     ) -> PlanningResult: ...
@@ -206,7 +218,7 @@ class FixtureTripPlanner:
             selection = parse_fixture_selection(response.message.content)
             if not _has_exact_fixture_selection(selection, plan):
                 raise ValueError(INVALID_SELECTION_MESSAGE)
-            result = nanjing_planning_result()
+            result = nanjing_planning_result(resolved_request.transport)
             await emit_progress(progress, "pois.found", {"count": 9})
             await emit_progress(progress, "routes.calculated", {"count": 6})
             validate_plan(result.plan, {stop.poi.uid for day in plan.days for stop in day.stops})
@@ -223,3 +235,11 @@ class FixtureTripPlanner:
         progress: ProgressCallback | None = None,
     ) -> PlanningResult:
         raise TripPlannerError("PLAN_NOT_AVAILABLE", "当前目的地的可播放行程尚未接入")
+
+    async def reroute(
+        self,
+        request: TripRerouteRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult:
+        raise TripPlannerError("PLAN_NOT_AVAILABLE", "示例路线固定，无法重新规划优先方式")

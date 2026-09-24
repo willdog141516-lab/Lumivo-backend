@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from app.baidu_map import BaiduMapAdapter, MapProviderError
-from app.domain.trips import GeoPoint, RouteLeg, VerifiedPoi
+from app.domain.trips import GeoPoint, RouteLeg, TravelMode, VerifiedPoi
 from app.map_provider import PoiSearchQuery, RouteRequest
 from app.settings import Settings
 
@@ -74,9 +74,12 @@ def test_baidu_adapter_normalizes_geocode_poi_and_route_facts():
                 verified_at=datetime.now(timezone.utc),
             )
             leg = await adapter.route(RouteRequest(pois[0], endpoint))
-            return destination, pois, leg
+            ride_leg = await adapter.route(
+                RouteRequest(pois[0], endpoint, TravelMode.RIDE)
+            )
+            return destination, pois, leg, ride_leg
 
-    destination, pois, leg = asyncio.run(run())
+    destination, pois, leg, ride_leg = asyncio.run(run())
 
     assert destination.point.crs.value == "BD09"
     assert pois[0].uid == "real-poi-1"
@@ -87,11 +90,94 @@ def test_baidu_adapter_normalizes_geocode_poi_and_route_facts():
     assert leg.geometry[0] == pois[0].point
     assert leg.geometry[1].lng == 118.798
     assert leg.geometry[-1].lng == 118.8
+    assert ride_leg.mode is TravelMode.RIDE
     assert paths == [
         "/geocoding/v3/",
         "/place/v2/search",
         "/directionlite/v1/walking",
+        "/directionlite/v1/riding",
     ]
+
+
+def test_baidu_adapter_parses_nested_transit_steps():
+    start = VerifiedPoi(
+        uid="transit-start",
+        name="起点",
+        address="地址",
+        point=GeoPoint(lng=118.7, lat=32.0),
+        recommended_stay_minutes=60,
+        source="baidu",
+        verified_at=datetime.now(timezone.utc),
+    )
+    end = start.model_copy(
+        update={
+            "uid": "transit-end",
+            "name": "终点",
+            "point": GeoPoint(lng=118.8, lat=32.06),
+        }
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/directionlite/v1/transit"
+        return httpx.Response(
+            200,
+            json={
+                "status": 0,
+                "message": "ok",
+                "result": {
+                    "origin": {"location": {"lng": 118.7, "lat": 32.0}},
+                    "destination": {"location": {"lng": 118.8, "lat": 32.06}},
+                    "routes": [
+                        {
+                            "distance": 22274,
+                            "duration": 4143,
+                            "line_price": 2,
+                            "price": 2,
+                            "traffic_condition": [],
+                            "steps": [
+                                [
+                                    {
+                                        "distance": 100,
+                                        "duration": 60,
+                                        "end_location": {"lng": 118.72, "lat": 32.01},
+                                        "instruction": "步行",
+                                        "path": "118.71,32.005;118.72,32.01",
+                                        "start_location": {"lng": 118.7, "lat": 32.0},
+                                        "type": 5,
+                                        "vehicle": {},
+                                    }
+                                ],
+                                [
+                                    {
+                                        "distance": 200,
+                                        "duration": 120,
+                                        "end_location": {"lng": 118.79, "lat": 32.05},
+                                        "instruction": "乘坐公交",
+                                        "path": "118.72,32.01;118.79,32.05",
+                                        "start_location": {"lng": 118.72, "lat": 32.01},
+                                        "type": 3,
+                                        "vehicle": {"name": "公交"},
+                                    }
+                                ],
+                            ],
+                        }
+                    ],
+                    "taxi": {},
+                },
+            },
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = BaiduMapAdapter(Settings(baidu_map_ak="test-ak", _env_file=None), client)
+            return await adapter.route(RouteRequest(start, end, TravelMode.TRANSIT))
+
+    leg = asyncio.run(run())
+
+    assert leg.mode is TravelMode.TRANSIT
+    assert leg.distance_meters == 22274
+    assert leg.duration_seconds == 4143
+    assert [point.lng for point in leg.geometry] == [118.7, 118.71, 118.72, 118.79, 118.8]
 
 
 def test_baidu_adapter_adds_sn_signature_when_sk_is_configured():

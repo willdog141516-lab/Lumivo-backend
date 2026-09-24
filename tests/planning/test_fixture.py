@@ -1,13 +1,37 @@
 import asyncio
+import json
 
 import pytest
 
-from app.domain.chat import TripRevisionRequest
+from app.domain.chat import (
+    ChatResponse,
+    TripPlanRequest,
+    TripRerouteRequest,
+    TripRevisionRequest,
+)
 from app.domain.errors import ErrorCode
-from app.fixtures_nanjing import nanjing_planning_result
+from app.domain.trips import TravelMode
+from app.fixtures_nanjing import nanjing_planning_result, nanjing_trip_plan
 from app.planning_service import FixtureTripPlanner, TripPlannerError
 from app.planning_validator import PlanValidationError, validate_plan
 from app.story_compiler import compile_timeline
+
+
+class FixtureSelectionChatClient:
+    async def complete(self, request):
+        plan = nanjing_trip_plan()
+        selection = {
+            "days": [
+                {
+                    "day": day.day_index,
+                    "poiUids": [stop.poi.uid for stop in day.stops],
+                }
+                for day in plan.days
+            ]
+        }
+        return ChatResponse(
+            message={"role": "assistant", "content": json.dumps(selection)}
+        )
 
 
 def test_fixture_plan_is_valid_and_timeline_identity_matches():
@@ -24,6 +48,27 @@ def test_fixture_plan_is_valid_and_timeline_identity_matches():
     ]
     assert result.timeline.chapters[-1].duration_ms == 2_000
     assert result.timeline.total_duration_ms == 27_000
+
+
+def test_fixture_planner_applies_the_selected_transport_to_every_route_leg():
+    result = asyncio.run(
+        FixtureTripPlanner(FixtureSelectionChatClient()).plan(
+            TripPlanRequest(
+                message="南京三日游",
+                destination="南京",
+                days=3,
+                transport=TravelMode.RIDE,
+            )
+        )
+    )
+
+    assert {
+        leg.mode
+        for day in result.plan.days
+        for leg in day.route_legs
+    } == {TravelMode.RIDE}
+    assert result.timeline.trip_id == result.plan.id
+    assert result.timeline.trip_version == result.plan.version
 
 
 def test_compiler_keeps_commands_inside_their_chapter_windows():
@@ -95,5 +140,22 @@ def test_fixture_revision_fails_closed():
                 )
             )
         )
+
+    assert error.value.code == "PLAN_NOT_AVAILABLE"
+
+
+def test_fixture_route_preference_switching_fails_closed():
+    plan = nanjing_trip_plan()
+    compact_plan = plan.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude={"days": {"__all__": {"routeLegs"}}},
+    )
+    request = TripRerouteRequest.model_validate(
+        {"plan": compact_plan, "transport": "ride"}
+    )
+
+    with pytest.raises(TripPlannerError) as error:
+        asyncio.run(FixtureTripPlanner(None).reroute(request))
 
     assert error.value.code == "PLAN_NOT_AVAILABLE"

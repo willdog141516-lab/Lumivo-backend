@@ -146,6 +146,23 @@ def nanjing_trip_plan() -> TripPlan:
     )
 
 
-def nanjing_planning_result() -> PlanningResult:
+def nanjing_planning_result(transport: TravelMode | None = None) -> PlanningResult:
     plan = nanjing_trip_plan()
+    if transport is not None:
+        # ponytail: fixture modes reuse fixed route facts; live mode-specific routes require full-real.
+        plan = plan.model_copy(
+            update={
+                "days": [
+                    day.model_copy(
+                        update={
+                            "route_legs": [
+                                leg.model_copy(update={"mode": transport})
+                                for leg in day.route_legs
+                            ]
+                        }
+                    )
+                    for day in plan.days
+                ]
+            }
+        )
     return PlanningResult(plan=plan, timeline=compile_timeline(plan))

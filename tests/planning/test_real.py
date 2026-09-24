@@ -4,8 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.baidu_map import MapProviderError
 from app.ai_client import AiClientError
-from app.domain.chat import ChatMessage, TripPlanRequest, TripRevisionRequest
+from app.domain.chat import (
+    ChatMessage,
+    TripPlanRequest,
+    TripRerouteRequest,
+    TripRevisionRequest,
+)
 from app.domain.trips import GeoPoint, RouteLeg, TravelMode, VerifiedPoi
 from app.map_provider import PoiSearchQuery, ResolvedDestination, RouteRequest
 from app.model_provider import (
@@ -57,6 +63,7 @@ class FakeMapProvider:
         self.search_queries: list[PoiSearchQuery] = []
         self.route_calls = 0
         self.route_modes = []
+        self.fail_on_route_call = None
 
     async def resolve_destination(self, name: str) -> ResolvedDestination:
         return ResolvedDestination(name=name, point=self.first.point)
@@ -68,6 +75,8 @@ class FakeMapProvider:
     async def route(self, request: RouteRequest) -> RouteLeg:
         self.route_calls += 1
         self.route_modes.append(request.mode)
+        if self.route_calls == self.fail_on_route_call:
+            raise MapProviderError("ROUTE_UNAVAILABLE", "route unavailable")
         return RouteLeg(
             id=f"real-route-{request.from_poi.uid}-{request.to_poi.uid}",
             from_poi_uid=request.from_poi.uid,
@@ -101,6 +110,11 @@ class FakeModelProvider:
 
     async def revise_day(self, request: RevisionRequest) -> ProposedRevision:
         return ProposedRevision(day_index=request.day_index, poi_uids=("p1", "p3"))
+
+
+class ThreeStopFakeModelProvider(FakeModelProvider):
+    async def create_schedule(self, request: ScheduleRequest) -> ProposedSchedule:
+        return ProposedSchedule(days=(PlannedDay(1, ("p1", "p2", "p3")),))
 
 
 class TwoDayFakeModelProvider(FakeModelProvider):
@@ -191,6 +205,85 @@ def test_real_planner_builds_timeline_from_provider_facts():
     assert result.plan.days[0].route_legs[0].geometry[1].lng == 118.8
     assert result.timeline.trip_id == result.plan.id
     assert result.timeline.trip_version == result.plan.version
+
+
+def test_real_planner_reroutes_every_leg_and_rebuilds_the_timeline():
+    map_provider = FakeMapProvider()
+    planner = RealTripPlanner(map_provider, ThreeStopFakeModelProvider())
+    original = asyncio.run(
+        planner.plan(
+            TripPlanRequest(message="成都一日游", destination="成都", days=1)
+        )
+    )
+    route_snapshot = SimpleNamespace(
+        id=original.plan.id,
+        version=original.plan.version,
+        destination=original.plan.destination,
+        summary=original.plan.summary,
+        warnings=original.plan.warnings,
+        days=[
+            SimpleNamespace(
+                day_index=day.day_index,
+                title=day.title,
+                date=day.date,
+                summary=day.summary,
+                stops=day.stops,
+            )
+            for day in original.plan.days
+        ],
+    )
+
+    rerouted = asyncio.run(
+        planner.reroute(
+            SimpleNamespace(plan=route_snapshot, transport=TravelMode.RIDE)
+        )
+    )
+
+    assert map_provider.route_modes == [
+        TravelMode.WALK,
+        TravelMode.WALK,
+        TravelMode.RIDE,
+        TravelMode.RIDE,
+    ]
+    assert rerouted.plan.version == original.plan.version + 1
+    assert [leg.mode for leg in rerouted.plan.days[0].route_legs] == [
+        TravelMode.RIDE,
+        TravelMode.RIDE,
+    ]
+    assert [stop.poi.uid for stop in rerouted.plan.days[0].stops] == [
+        stop.poi.uid for stop in original.plan.days[0].stops
+    ]
+    assert rerouted.timeline.trip_id == original.plan.id
+    assert rerouted.timeline.trip_version == rerouted.plan.version
+
+
+def test_real_planner_does_not_return_a_partial_reroute_when_a_leg_fails():
+    map_provider = FakeMapProvider()
+    planner = RealTripPlanner(map_provider, ThreeStopFakeModelProvider())
+    original = asyncio.run(
+        planner.plan(
+            TripPlanRequest(message="成都一日游", destination="成都", days=1)
+        )
+    )
+    route_snapshot = original.plan.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude={"days": {"__all__": {"routeLegs"}}},
+    )
+    request = TripRerouteRequest.model_validate(
+        {"plan": route_snapshot, "transport": "ride"}
+    )
+    map_provider.fail_on_route_call = map_provider.route_calls + 2
+    progress_events = []
+
+    async def on_progress(event, _data):
+        progress_events.append(event)
+
+    with pytest.raises(TripPlannerError) as error:
+        asyncio.run(planner.reroute(request, progress=on_progress))
+
+    assert error.value.code == "ROUTE_UNAVAILABLE"
+    assert progress_events == []
 
 
 def test_real_planner_translates_intent_provider_failure_to_structured_error():
@@ -452,6 +545,19 @@ class TransitModelProvider(FakeModelProvider):
         )
 
 
+class MixedModeModelProvider(FakeModelProvider):
+    async def create_schedule(self, request: ScheduleRequest) -> ProposedSchedule:
+        return ProposedSchedule(
+            days=(
+                PlannedDay(
+                    1,
+                    ("p1", "p2", "p3"),
+                    (TravelMode.WALK, TravelMode.TRANSIT),
+                ),
+            )
+        )
+
+
 def test_real_planner_routes_each_leg_with_the_ai_selected_transport_mode():
     map_provider = FakeMapProvider()
     result = asyncio.run(
@@ -462,3 +568,23 @@ def test_real_planner_routes_each_leg_with_the_ai_selected_transport_mode():
 
     assert map_provider.route_modes == [TravelMode.TRANSIT]
     assert result.plan.days[0].route_legs[0].mode is TravelMode.TRANSIT
+
+
+def test_real_planner_prioritizes_the_requested_transport_for_every_route_leg():
+    map_provider = FakeMapProvider()
+    result = asyncio.run(
+        RealTripPlanner(map_provider, MixedModeModelProvider()).plan(
+            TripPlanRequest(
+                message="成都一日游",
+                destination="成都",
+                days=1,
+                transport="drive",
+            )
+        )
+    )
+
+    assert map_provider.route_modes == [TravelMode.DRIVE, TravelMode.DRIVE]
+    assert [leg.mode for leg in result.plan.days[0].route_legs] == [
+        TravelMode.DRIVE,
+        TravelMode.DRIVE,
+    ]

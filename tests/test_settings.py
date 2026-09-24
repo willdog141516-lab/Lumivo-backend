@@ -24,6 +24,7 @@ def test_settings_accept_environment_overrides(monkeypatch):
     monkeypatch.setenv("LUMIVO_PROVIDER_MODE", "map-real")
     monkeypatch.setenv("LUMIVO_FRONTEND_ORIGIN", "http://localhost:3100")
     monkeypatch.setenv("LUMIVO_BAIDU_MAP_SK", "test-sk")
+    monkeypatch.setenv("LUMIVO_BAIDU_VECTOR_TILE_AK", "vector-ak")
 
     settings = Settings()
 
@@ -32,3 +33,4 @@ def test_settings_accept_environment_overrides(monkeypatch):
     assert settings.provider_mode == "map-real"
     assert settings.frontend_origin == "http://localhost:3100"
     assert settings.baidu_map_sk == "test-sk"
+    assert settings.baidu_vector_tile_ak == "vector-ak"

@@ -44,6 +44,13 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("LUMIVO_BAIDU_MAP_AK", "BAIDU_MAP_AK"),
     )
+    baidu_vector_tile_ak: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "LUMIVO_BAIDU_VECTOR_TILE_AK",
+            "BAIDU_VECTOR_TILE_AK",
+        ),
+    )
     baidu_map_sk: str | None = Field(
         default=None,
         validation_alias=AliasChoices("LUMIVO_BAIDU_MAP_SK", "BAIDU_MAP_SK"),
@@ -51,6 +58,18 @@ class Settings(BaseSettings):
     map_base_url: str = Field(
         default="https://api.map.baidu.com",
         validation_alias=AliasChoices("LUMIVO_MAP_BASE_URL", "MAP_BASE_URL"),
+    )
+    baidu_vector_tile_base_url: str = Field(
+        default="https://apimaponline0.bdimg.com",
+        validation_alias=AliasChoices(
+            "LUMIVO_BAIDU_VECTOR_TILE_BASE_URL", "BAIDU_VECTOR_TILE_BASE_URL"
+        ),
+    )
+    baidu_map_static_base_url: str = Field(
+        default="https://maponline0.bdimg.com",
+        validation_alias=AliasChoices(
+            "LUMIVO_BAIDU_MAP_STATIC_BASE_URL", "BAIDU_MAP_STATIC_BASE_URL"
+        ),
     )
     map_timeout_ms: int = Field(
         default=10_000,

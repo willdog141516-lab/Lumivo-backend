@@ -4,8 +4,16 @@ import re
 from uuid import uuid4
 
 from app.baidu_map import MapProviderError
-from app.domain.chat import TripPlanRequest, TripRevisionRequest
-from app.domain.trips import PlanningResult, TravelMode, TripDay, TripPlan, TripStop, VerifiedPoi
+from app.domain.chat import TripPlanRequest, TripRerouteRequest, TripRevisionRequest
+from app.domain.trips import (
+    PlanningResult,
+    RouteLeg,
+    TravelMode,
+    TripDay,
+    TripPlan,
+    TripStop,
+    VerifiedPoi,
+)
 from app.map_provider import MapProvider, PoiSearchQuery, RouteRequest
 from app.model_provider import (
     ModelProvider,
@@ -153,11 +161,13 @@ async def _route_leg(
     start: VerifiedPoi,
     end: VerifiedPoi,
     mode: TravelMode,
+    *,
+    fallback_transit_to_drive: bool = True,
 ):
     try:
         return await map_provider.route(RouteRequest(start, end, mode))
     except MapProviderError as error:
-        if error.code != "ROUTE_UNAVAILABLE" or mode is not TravelMode.TRANSIT:
+        if error.code != "ROUTE_UNAVAILABLE" or mode is not TravelMode.TRANSIT or not fallback_transit_to_drive:
             raise
         return await map_provider.route(RouteRequest(start, end, TravelMode.DRIVE))
 
@@ -219,9 +229,12 @@ class RealTripPlanner:
                 pois = [candidate_by_uid[uid] for uid in proposed_day.poi_uids]
                 selected_pois.extend(pois)
                 stops = [TripStop(poi=poi) for poi in pois]
-                route_modes = proposed_day.transport_modes or (
-                    TravelMode.WALK,
-                ) * (len(pois) - 1)
+                route_modes = (
+                    (request.transport,) * (len(pois) - 1)
+                    if request.transport is not None
+                    else proposed_day.transport_modes
+                    or (TravelMode.WALK,) * (len(pois) - 1)
+                )
                 if len(route_modes) != len(pois) - 1:
                     raise TripPlannerError("MODEL_OUTPUT_INVALID", INVALID_MODEL_OUTPUT)
                 route_legs = [
@@ -472,6 +485,65 @@ class RealTripPlanner:
             raise TripPlannerError(error.code, str(error)) from None
 
         result = PlanningResult(plan=revised_plan, timeline=compile_timeline(revised_plan))
+        await emit_progress(progress, "timeline.ready", {})
+        return result
+
+    async def reroute(
+        self,
+        request: TripRerouteRequest,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> PlanningResult:
+        original = request.plan
+        if not any(len(day.stops) > 1 for day in original.days):
+            raise TripPlannerError("PLAN_NOT_AVAILABLE", "当前行程没有可重新规划的路段")
+
+        try:
+            days: list[TripDay] = []
+            route_count = 0
+            for day in original.days:
+                stops = list(day.stops)
+                route_legs: list[RouteLeg] = []
+                for start, end in zip(stops, stops[1:]):
+                    route = await _route_leg(
+                        self._map_provider,
+                        start.poi,
+                        end.poi,
+                        request.transport,
+                        fallback_transit_to_drive=False,
+                    )
+                    route_legs.append(route)
+                    route_count += 1
+                days.append(
+                    TripDay(
+                        day_index=day.day_index,
+                        title=day.title,
+                        date=day.date,
+                        summary=day.summary,
+                        stops=stops,
+                        route_legs=route_legs,
+                    )
+                )
+
+            plan = TripPlan(
+                id=original.id,
+                version=original.version + 1,
+                destination=original.destination,
+                summary=original.summary,
+                days=days,
+                warnings=original.warnings,
+            )
+            validate_plan(plan)
+            await emit_progress(progress, "routes.calculated", {"count": route_count})
+            await emit_progress(progress, "plan.validated", {})
+        except TripPlannerError:
+            raise
+        except MapProviderError as error:
+            raise TripPlannerError(error.code, str(error)) from None
+        except PlanValidationError as error:
+            raise TripPlannerError("PLAN_INCOMPLETE", str(error)) from None
+
+        result = PlanningResult(plan=plan, timeline=compile_timeline(plan))
         await emit_progress(progress, "timeline.ready", {})
         return result
 

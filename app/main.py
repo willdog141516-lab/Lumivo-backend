@@ -8,6 +8,7 @@ from app.api.canonical import create_canonical_router
 from app.api.compat import create_compat_router
 from app.api.health import create_health_router
 from app.baidu_map import BaiduMapAdapter
+from app.map_proxy import create_map_proxy_router
 from app.model_provider import OpenAIModelAdapter
 from app.planning_service import FixtureTripPlanner, TripPlanner
 from app.real_planning_service import RealTripPlanner
@@ -74,6 +75,7 @@ def create_app(
     application.include_router(create_compat_router(resolved_settings, resolved_chat_client, resolved_planner))
     application.include_router(create_canonical_router(resolved_planner))
     application.include_router(create_health_router(resolved_settings), prefix="/api/v1")
+    application.include_router(create_map_proxy_router(resolved_settings))
     return application
 
 

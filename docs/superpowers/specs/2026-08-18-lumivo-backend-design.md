@@ -2,7 +2,7 @@
 
 Date: 2026-08-18
 
-Status: Fixture, full-real, canonical NDJSON, and stateless revision paths implemented locally; live smoke and hardening pending
+Status: Fixture, full-real, canonical NDJSON, stateless revision, route-preference rerouting, and server-proxied map resources implemented locally; live smoke and hardening pending
 
 ## 1. Purpose
 
@@ -22,7 +22,7 @@ The backend runs locally and serves the sibling Next.js frontend. The MVP optimi
 - AI selection and scheduling constrained to verified candidates.
 - Plan validation and grounded narration.
 - StoryTimeline compilation.
-- Initial planning and stateless revision endpoints.
+- Initial planning, stateless revision, and stateless route-preference rerouting endpoints.
 - Streaming progress, cancellation, structured errors, and deterministic fixture mode.
 
 ### Excluded
@@ -132,7 +132,7 @@ class TripRequest(BaseModel):
     interests: list[str] = Field(default_factory=list)
     pace: str | None = None
     budget: str | None = None
-    transport: list[TravelMode] = Field(default_factory=list)
+    transport: TravelMode | None = None
 
 
 class VerifiedPoi(BaseModel):
@@ -159,6 +159,8 @@ class RouteLeg(BaseModel):
 `TripStop` contains one VerifiedPoi, optional arrival/departure times, and grounded narration. `TripDay` contains ordered stops and the route leg between each consecutive pair. `TripPlan` contains `id`, monotonically increasing `version`, destination, summary, days, and warnings.
 
 `StoryTimeline` contains `trip_id`, `trip_version`, total duration, and ordered chapters. Each command has a stable ID, chapter ID, semantic type, start time, duration, easing, and a type-specific payload.
+
+Initial planning may receive an optional transport preference; when omitted, it keeps AI-selected per-leg modes, including the existing transit-to-driving fallback. Story Map rerouting requests one exact mode for every consecutive stop pair and does not fall back to another mode. Fixture routes keep fixed sample geometry, distance, and duration and cannot be rerouted.
 
 ## 6. Provider interfaces
 
@@ -255,6 +257,21 @@ Animation durations are presentation durations, not real travel durations. Route
 
 Returns process health and configured Adapter modes without secrets.
 
+### Browser map resource proxy
+
+The browser does not call Baidu map hosts directly. It requests the narrow
+server-owned resource boundary instead:
+
+- `GET /api/v1/map/baidu/pvd?z&x&y` validates tile coordinates, constructs the
+  Baidu vector-tile parameter, injects the backend-only vector-tile AK, and returns the
+  upstream binary content type and body.
+- `GET /api/v1/map/baidu/sty/{asset_name}` serves only the allowlisted
+  `icons_2x.js`, `fs.js`, and `indoor_fs.js` assets.
+
+The frontend sends no `ak`, `sk`, `sn`, `ApiAuthorization`, or Baidu host in
+these requests. Missing credentials and upstream failures return structured
+errors; the proxy is not a general-purpose forwarder.
+
 ### Current frontend compatibility routes
 
 The Python service also keeps the existing frontend contract while the frontend
@@ -288,6 +305,10 @@ The final `planning.completed` event contains `{ "plan": TripPlan, "timeline": S
 Accepts the complete current TripPlan and a revision instruction. It searches for explicitly named POIs first and includes matching verified candidates in the target day; if a named POI is unavailable in the current destination it returns `POI_NOT_FOUND` instead of substituting a random POI. It returns a new plan with the same ID, incremented version, and a matching newly compiled timeline; the target day must actually change its POI order or transport modes. No server-side session is required.
 
 The event sequence is strictly increasing per request. Client disconnect cancels remaining provider work where cancellation is supported.
+
+### POST /api/v1/trips/reroute
+
+Accepts the current plan identity and metadata, each day's stops, and one transport preference. The request omits existing route legs and geometry. The backend requests a verified route for every consecutive stop pair in that exact mode; if any leg fails, it returns one structured error and no partial plan. Success preserves the trip ID and stops, increments the version, validates the new route legs, and returns a freshly compiled matching timeline. Fixture mode returns PLAN_NOT_AVAILABLE because its sample routes are fixed.
 
 ## 11. Error model
 
@@ -338,7 +359,7 @@ Settings come from environment variables parsed once at process startup. Planned
 | `map-real` | BaiduMap | MockModel | Independent map verification |
 | `full-real` | BaiduMap | RealModel | Complete local product flow |
 
-The frontend never selects backend providers and never receives backend credentials. Baidu requests use `LUMIVO_BAIDU_MAP_AK`; when the Baidu console enables SN validation, the backend also reads `LUMIVO_BAIDU_MAP_SK` and signs each request with `timestamp` and `sn`. Local CORS allows only the configured frontend origin, initially `http://localhost:8989`.
+The frontend never selects backend providers and never receives backend credentials. Baidu Web API requests use `LUMIVO_BAIDU_MAP_AK`; when the Baidu console enables SN validation, the backend also reads `LUMIVO_BAIDU_MAP_SK` and signs each request with `timestamp` and `sn`. The vector-tile proxy separately reads `LUMIVO_BAIDU_VECTOR_TILE_AK`, a browser-type AK kept only on the backend because the JSAPI Three tile host does not accept the server API AK. Local CORS allows only the configured frontend origin, initially `http://localhost:8989`.
 
 ## 13. Testing
 
@@ -356,6 +377,8 @@ Default tests require no network and no real keys.
 
 - Secrets exist only in ignored local environment files.
 - `.env.example` contains variable names and mock-safe defaults, not credentials.
+- Public request models reject unknown fields, so Provider credentials are not accepted by business interfaces.
+- Provider credentials are resolved inside the server-side Adapter and never returned to the frontend.
 - Logs include request ID, event type, Adapter mode, elapsed time, and error code.
 - Logs redact authorization values, provider keys, and full user messages.
 - Health responses expose mode names and process health only.
@@ -402,3 +425,4 @@ The backend MVP is complete when:
 5. Progress events arrive in the documented order and end in one result or one structured error.
 6. Overseas destinations stop before POI, route, or model planning.
 7. The sibling frontend can consume the generated contract and play the returned timeline locally.
+8. A real Story Map plan can reroute every leg in one selected mode and receive a matching incremented plan/timeline; fixture routes fail closed.

@@ -14,6 +14,8 @@ Python 兼容后端已接管前端当前使用的本地接口：
 - `POST /api/chat`：OpenAI-compatible Chat Completions 代理，支持 SSE 流式回复
 - `POST /api/trips/plan`：fixture 或真实百度数据规划，严格校验 AI 返回的 POI UID
 - `GET /api/v1/health`：Python 规范健康检查
+- `GET /api/v1/map/baidu/pvd`：后端注入瓦片 AK 的矢量瓦片代理
+- `GET /api/v1/map/baidu/sty/{asset_name}`：严格白名单的地图样式资源代理
 - `TripPlan`、`StoryTimeline` 的前端 camelCase JSON 契约
 - 默认不联网的 Pytest 测试
 
@@ -62,6 +64,8 @@ http://localhost:8000/api/v1/health
 python -m pytest
 ```
 
+浏览器底图不再直连百度：前端只请求本服务的地图资源代理，服务端再访问固定的百度瓦片和样式 host。浏览器 Network 中不会出现百度 AK、SK 或百度 host；实时底图需要后端配置 `LUMIVO_BAIDU_VECTOR_TILE_AK`（百度浏览器端 AK，仅存后端）；路线和地理编码仍使用服务端 `LUMIVO_BAIDU_MAP_AK`。
+
 默认 fixture 测试不需要百度密钥、AI 密钥或网络连接。
 
 ## 前端兼容接口
@@ -78,10 +82,13 @@ python -m pytest
 LUMIVO_PROVIDER_MODE=full-real
 LUMIVO_BAIDU_MAP_AK=你的百度服务端AK
 LUMIVO_BAIDU_MAP_SK=你的百度服务端SK（启用SN校验时填写）
+LUMIVO_BAIDU_VECTOR_TILE_AK=后端保存的百度浏览器端AK（仅地图瓦片）
 AI_API_KEY=你的AI服务密钥
 ```
 
 真实模式当前默认使用步行路线；百度 POI 名称、地址、坐标、路线几何、距离和耗时来自服务端响应。实时百度/AI 凭据、配额和前端播放需要单独 smoke 验证。
+
+百度服务端 AK/SK 只在后端配置，业务接口不接受 `ak`、`sk` 或其他 Provider 凭据字段；后端调用百度时才把服务端 AK 加入 Provider 请求。生产环境应使用 Secret Manager 等运行时密钥管理服务，不要把真实值写入源码、`.env.example` 或日志。
 
 ## 配置
 
@@ -95,7 +102,10 @@ AI_API_KEY=你的AI服务密钥
 | `LUMIVO_FRONTEND_ORIGIN` | `http://localhost:8989` | CORS 允许的前端地址 |
 | `LUMIVO_BAIDU_MAP_AK` | 空 | 百度地图服务端 AK；真实模式必填 |
 | `LUMIVO_BAIDU_MAP_SK` | 空 | 百度地图服务端 SK；启用 SN 校验时填写 |
+| `LUMIVO_BAIDU_VECTOR_TILE_AK` | 空 | 后端使用的百度浏览器端 AK；只用于矢量瓦片，不发送给浏览器 |
 | `LUMIVO_MAP_BASE_URL` | `https://api.map.baidu.com` | 百度地图服务地址 |
+| `LUMIVO_BAIDU_VECTOR_TILE_BASE_URL` | `https://apimaponline0.bdimg.com` | 百度矢量瓦片上游 host；仅后端使用 |
+| `LUMIVO_BAIDU_MAP_STATIC_BASE_URL` | `https://maponline0.bdimg.com` | 百度地图静态样式上游 host；仅后端使用 |
 | `LUMIVO_MAP_TIMEOUT_MS` | `10000` | 百度地图请求超时毫秒数 |
 | `AI_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible 服务地址 |
 | `AI_API_KEY` | 空 | AI 服务密钥；也兼容 `DEEPSEEK_API_KEY` |

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from hashlib import md5
 from time import time
@@ -62,10 +63,24 @@ def _path_points(value: object) -> list[GeoPoint]:
     return points
 
 
+def _flatten_route_steps(value: object) -> list[dict[str, object]]:
+    if isinstance(value, dict):
+        return [value]
+    if not isinstance(value, list):
+        raise ValueError("invalid route steps")
+
+    steps: list[dict[str, object]] = []
+    for item in value:
+        steps.extend(_flatten_route_steps(item))
+    return steps
+
+
 class BaiduMapAdapter:
     def __init__(self, settings: Settings, http_client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings
         self._http_client = http_client
+        # ponytail: process-local cap; use a distributed limiter if the AK serves multiple workers.
+        self._route_semaphore = asyncio.Semaphore(1)
 
     def _api_key(self) -> str:
         if not self._settings.baidu_map_ak:
@@ -184,32 +199,37 @@ class BaiduMapAdapter:
 
     async def route(self, request: RouteRequest) -> RouteLeg:
         mode_path = _ROUTE_PATHS[request.mode]
-        payload = await self._get(
-            f"/directionlite/v1/{mode_path}",
-            {
-                "origin": f"{request.from_poi.point.lat:.6f},{request.from_poi.point.lng:.6f}",
-                "destination": f"{request.to_poi.point.lat:.6f},{request.to_poi.point.lng:.6f}",
-                "origin_uid": request.from_poi.uid,
-                "destination_uid": request.to_poi.uid,
-                "coord_type": "bd09ll",
-                "ret_coordtype": "bd09ll",
-                "steps_info": 1,
-                "ak": self._api_key(),
-            },
+        async with self._route_semaphore:
+            payload = await self._get(
+                f"/directionlite/v1/{mode_path}",
+                {
+                    "origin": f"{request.from_poi.point.lat:.6f},{request.from_poi.point.lng:.6f}",
+                    "destination": f"{request.to_poi.point.lat:.6f},{request.to_poi.point.lng:.6f}",
+                    "origin_uid": request.from_poi.uid,
+                    "destination_uid": request.to_poi.uid,
+                    "coord_type": "bd09ll",
+                    "ret_coordtype": "bd09ll",
+                    "steps_info": 1,
+                    "ak": self._api_key(),
+                },
+            )
+        status = _status(payload.get("status"))
+        unavailable_statuses = (
+            {1001, 1002, 1003}
+            if request.mode is TravelMode.TRANSIT
+            else {7}
         )
-        if _status(payload.get("status")) != 0:
-            raise MapProviderError("ROUTE_UNAVAILABLE", "百度路线服务返回错误")
+        if status in unavailable_statuses:
+            raise MapProviderError("ROUTE_UNAVAILABLE", "百度没有返回可用路线")
+        if status != 0:
+            raise MapProviderError("MAP_PROVIDER_ERROR", "百度路线服务暂时不可用")
         try:
             result = payload["result"]
             routes = result["routes"]  # type: ignore[index]
             route = routes[0]  # type: ignore[index]
             distance = int(float(route["distance"]))  # type: ignore[index]
             duration = int(float(route["duration"]))  # type: ignore[index]
-            steps = route["steps"]  # type: ignore[index]
-            if isinstance(steps, dict):
-                steps = [steps]
-            if not isinstance(steps, list):
-                raise ValueError("invalid route steps")
+            steps = _flatten_route_steps(route["steps"])  # type: ignore[index]
             path_points: list[GeoPoint] = []
             for step in steps:
                 if not isinstance(step, dict):

@@ -25,6 +25,8 @@ def records(response) -> list[dict[str, object]]:
 class StreamingPlanner:
     def __init__(self) -> None:
         self.revision_request: TripRevisionRequest | None = None
+        self.plan_request: TripPlanRequest | None = None
+        self.reroute_request = None
 
     async def plan(
         self,
@@ -32,6 +34,7 @@ class StreamingPlanner:
         *,
         progress: ProgressCallback | None = None,
     ):
+        self.plan_request = request
         assert progress is not None
         await progress("destination.validated", {"destination": request.destination})
         await progress("timeline.ready", {})
@@ -46,6 +49,12 @@ class StreamingPlanner:
         self.revision_request = request
         assert progress is not None
         await progress("timeline.ready", {})
+        return nanjing_planning_result()
+
+    async def reroute(self, request, *, progress=None):
+        self.reroute_request = request
+        assert progress is not None
+        await progress("routes.calculated", {"count": 6})
         return nanjing_planning_result()
 
 
@@ -84,6 +93,29 @@ def test_plan_streams_progress_and_completion():
     completed = records(response)[-1]["data"]
     assert completed["plan"]["id"] == "fixture-nanjing-3d"
     assert completed["timeline"]["tripId"] == "fixture-nanjing-3d"
+
+
+@pytest.mark.parametrize("transport", ["transit", "drive", "walk", "ride"])
+def test_plan_stream_passes_transport_preference_to_planner(transport):
+    planner = StreamingPlanner()
+    response = TestClient(make_app(planner)).post(
+        "/api/v1/trips/plan",
+        json={"message": "南京三日游", "destination": "南京", "days": 3, "transport": transport},
+    )
+
+    assert response.status_code == 200
+    assert planner.plan_request is not None
+    assert planner.plan_request.transport.value == transport
+
+
+def test_plan_stream_rejects_unsupported_transport_preference():
+    response = TestClient(make_app(StreamingPlanner())).post(
+        "/api/v1/trips/plan",
+        json={"message": "南京三日游", "destination": "南京", "days": 3, "transport": "scooter"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
 def test_plan_stream_accepts_dialogue_without_explicit_destination_or_days():
@@ -162,6 +194,22 @@ def test_plan_stream_rejects_invalid_input_before_streaming():
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
+def test_plan_stream_rejects_provider_credentials_in_business_request():
+    response = TestClient(make_app(StreamingPlanner())).post(
+        "/api/v1/trips/plan",
+        json={
+            "message": "南京三日游",
+            "destination": "南京",
+            "days": 3,
+            "ak": "must-not-echo",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert "must-not-echo" not in response.text
+
+
 def test_revision_stream_parses_the_complete_current_plan():
     planner = StreamingPlanner()
     plan = nanjing_planning_result().plan
@@ -179,6 +227,27 @@ def test_revision_stream_parses_the_complete_current_plan():
     assert planner.revision_request is not None
     assert planner.revision_request.plan.id == plan.id
     assert records(response)[-1]["event"] == "planning.completed"
+
+
+def test_reroute_stream_accepts_a_compact_plan_without_route_geometry():
+    planner = StreamingPlanner()
+    plan = nanjing_planning_result().plan
+    route_snapshot = plan.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude={"days": {"__all__": {"routeLegs"}}},
+    )
+
+    response = TestClient(make_app(planner)).post(
+        "/api/v1/trips/reroute",
+        json={"plan": route_snapshot, "transport": "ride"},
+    )
+
+    assert response.status_code == 200
+    assert planner.reroute_request.plan.id == plan.id
+    assert planner.reroute_request.plan.version == plan.version
+    assert planner.reroute_request.transport.value == "ride"
+    assert "routes.calculated" in [record["event"] for record in records(response)]
 
 
 def test_stream_cancels_planner_when_request_disconnects():

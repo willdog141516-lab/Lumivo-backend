@@ -119,6 +119,27 @@ class TripPlan(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class TripRerouteDay(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    day_index: int = Field(ge=1, alias="day")
+    title: str | None = None
+    date: Date | None = None
+    summary: str | None = None
+    stops: list[TripStop] = Field(min_length=1)
+
+
+class TripReroutePlan(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    version: int = Field(ge=1)
+    destination: str
+    summary: str
+    days: list[TripRerouteDay] = Field(min_length=1)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class PlanningResult(BaseModel):
     plan: TripPlan
     timeline: StoryTimeline

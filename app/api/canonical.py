@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
-from app.domain.chat import TripPlanRequest, TripRevisionRequest
+from app.domain.chat import TripPlanRequest, TripRerouteRequest, TripRevisionRequest
 from app.ai_client import AiClientError
 from app.domain.trips import PlanningResult
 from app.planning_service import ProgressCallback, TripPlanner, TripPlannerError
@@ -204,6 +204,22 @@ def create_canonical_router(planner: TripPlanner) -> APIRouter:
             _stream_events(
                 request,
                 lambda progress: planner.revise(parsed, progress=progress),  # type: ignore[arg-type]
+                request_id,
+            ),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.post("/reroute")
+    async def reroute(request: Request):
+        parsed = await _parse(request, TripRerouteRequest)
+        if isinstance(parsed, JSONResponse):
+            return parsed
+        request_id = uuid4().hex
+        return StreamingResponse(
+            _stream_events(
+                request,
+                lambda progress: planner.reroute(parsed, progress=progress),  # type: ignore[arg-type]
                 request_id,
             ),
             media_type="application/x-ndjson",

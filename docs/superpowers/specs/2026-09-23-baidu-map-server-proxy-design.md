@@ -2,7 +2,7 @@
 
 Date: 2026-09-23
 
-Status: Design approved in chat; implementation pending
+Status: Design approved and implemented locally; live browser/provider smoke pending
 
 ## 1. Goal
 
@@ -32,7 +32,7 @@ The backend exposes a narrow map-resource boundary:
 
 ```text
 Browser -> GET {NEXT_PUBLIC_AI_BACKEND_URL}/api/v1/map/baidu/pvd?z&x&y
-        -> GET {server-configured Baidu vector host}/pvd/?...&ak=server AK
+        -> GET {server-configured Baidu vector host}/pvd/?...&ak=backend-only vector-tile AK
 
 Browser -> GET {NEXT_PUBLIC_AI_BACKEND_URL}/api/v1/map/baidu/sty/{asset}
         -> GET {server-configured Baidu static host}/sty/{allowlisted asset}
@@ -40,7 +40,7 @@ Browser -> GET {NEXT_PUBLIC_AI_BACKEND_URL}/api/v1/map/baidu/sty/{asset}
 
 The browser-facing requests contain only validated tile coordinates or an
 allowlisted static asset name. The backend creates the Baidu vector-tile
-parameter encoding itself and injects `LUMIVO_BAIDU_MAP_AK`; any client `ak`,
+parameter encoding itself and injects `LUMIVO_BAIDU_VECTOR_TILE_AK`; any client `ak`,
 `sk`, `sn`, or authorization-like query values are ignored or rejected and are
 never forwarded.
 
@@ -61,7 +61,7 @@ Add a router factory for map resources and include it from `create_app`:
   - returns the upstream JavaScript body and content type;
   - never treats the path as a general proxy.
 
-The proxy uses the existing `map_timeout_ms` and `baidu_map_ak` settings. The
+The proxy uses the existing `map_timeout_ms` and the dedicated `baidu_vector_tile_ak` setting. `baidu_map_ak` remains reserved for Baidu Web API calls such as POI and route services. The
 two Baidu resource hosts are separate settings with safe Baidu defaults so
 tests can point them at a controlled mock server without changing production
 request construction. The proxy must not log complete upstream URLs or query
@@ -88,11 +88,11 @@ requires it.
 
 ## 6. Security and failure behavior
 
-- The browser never receives `LUMIVO_BAIDU_MAP_AK` or any server-side signing
+- The browser never receives `LUMIVO_BAIDU_VECTOR_TILE_AK`, `LUMIVO_BAIDU_MAP_AK`, or any server-side signing
   secret.
 - The proxy is an allowlist, not a general-purpose forward proxy.
 - Client-supplied credential parameters cannot override server settings.
-- Missing server AK fails closed with a structured error; it does not fall back
+- Missing vector-tile AK fails closed with a structured error; it does not fall back
   to a browser key or direct Baidu access.
 - Upstream timeout and non-success responses fail closed and do not return a
   playable map resource.
@@ -102,7 +102,7 @@ requires it.
 
 Backend tests cover:
 
-- valid tile coordinate translation and server-side AK injection;
+- valid tile coordinate translation and backend-only vector-tile AK injection;
 - rejection/ignoring of client credential parameters;
 - static-asset allowlisting;
 - missing AK, timeout, and upstream failure responses;
@@ -117,5 +117,4 @@ Frontend tests cover:
 Manual acceptance requires opening the story map with the backend running and
 checking DevTools Network: map requests must target the Lumivo backend only and
 must contain no `ak`, `sk`, `sn`, `ApiAuthorization`, or Baidu host. A live
-basemap also requires the server AK to be authorized for the Baidu vector-tile
-service; deterministic tests cannot prove that external permission.
+basemap also requires the backend-only vector-tile AK to be accepted by the Baidu JSAPI Three vector-tile service; deterministic tests cannot prove that external permission.
